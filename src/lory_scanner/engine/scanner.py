@@ -218,7 +218,7 @@ class Scanner:
         for rule in self.active:
             if not rule.applies_to_language(source.language):
                 continue
-            if not _path_allowed(source.relpath, rule):
+            if not _path_allowed(source, rule):
                 continue
             # The cheapest possible rejection: none of the literals every
             # match must contain is anywhere in the file, so no regex can hit.
@@ -464,10 +464,28 @@ def _rule_enabled(rule_id: str, config: ScanConfig) -> bool:
     return not any(fnmatch.fnmatch(rule_id, p) for p in config.ignore_rules)
 
 
-def _path_allowed(relpath: str, rule: Rule) -> bool:
-    if rule.paths and not any(path_matches(relpath, p) for p in rule.paths):
+def _path_allowed(source: SourceFile, rule: Rule) -> bool:
+    """Whether a rule's `paths:` scoping admits this file.
+
+    Tested against the path within the repository as well as the path within
+    the scan. Without that, `lory-scan scan .github` would quietly skip every
+    rule scoped to `**/.github/workflows/*.yml` — the rules most worth running
+    on exactly those files — and report a clean result.
+    """
+    candidates = {source.relpath, source.project_path}
+
+    if rule.paths and not any(
+        path_matches(candidate, pattern)
+        for pattern in rule.paths
+        for candidate in candidates
+    ):
         return False
-    return not any(path_matches(relpath, p) for p in rule.exclude_paths)
+
+    return not any(
+        path_matches(candidate, pattern)
+        for pattern in rule.exclude_paths
+        for candidate in candidates
+    )
 
 
 def _one_per_line(findings: list[Finding]) -> list[Finding]:

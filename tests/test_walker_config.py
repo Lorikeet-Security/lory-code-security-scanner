@@ -243,3 +243,30 @@ def test_api_scan_to_lory_cache(tmp_path):
     result, path = api.scan_to_lory_cache(tmp_path, respect_gitignore=False)
     assert path.exists()
     assert api.lory_rows(result)[0]["ref"].startswith("scan-")
+
+
+# ── rule scoping across scan roots ──────────────────────────────────────────
+
+
+@pytest.mark.skipif(not __import__("shutil").which("git"), reason="git not installed")
+def test_path_scoped_rules_survive_a_narrower_scan_root(tmp_path):
+    """Scanning a subdirectory must not silently disable its rules.
+
+    A rule scoped to `**/.github/workflows/*.yml` is exactly the rule you want
+    when you point the scanner at `.github` — and matching only against the
+    scan-relative path meant it never ran there, reporting a clean result.
+    """
+    root = git_repo(tmp_path)
+    workflows = root / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "ci.yml").write_text(
+        "jobs:\n  a:\n    steps:\n      - uses: actions/checkout@v4\n"
+    )
+    commit(root)
+
+    from_repo = api.scan(root, respect_gitignore=False)
+    from_subdir = api.scan(root / ".github", respect_gitignore=False)
+
+    rules_seen = {f.rule_id for f in from_repo.findings}
+    assert "ci.unpinned-action" in rules_seen
+    assert {f.rule_id for f in from_subdir.findings} == rules_seen

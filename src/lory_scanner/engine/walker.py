@@ -35,6 +35,15 @@ class SourceFile:
     relpath: str
     language: str
     text: str
+    #: Path relative to the repository root, which is not the same thing when
+    #: someone scans a subdirectory. Rules scoped with `paths:` match against
+    #: this as well, so `**/.github/workflows/*.yml` still means that file
+    #: whether the scan was pointed at the repo or at `.github`.
+    project_path: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.project_path:
+            self.project_path = self.relpath
 
     @property
     def lines(self) -> list[str]:
@@ -89,6 +98,8 @@ class Walker:
         self.paths = paths
         self.stats = WalkStats()
         self._ignored: frozenset[str] = frozenset()
+        #: The repository this scan sits inside, when it is a git checkout.
+        self.project_root = _git_toplevel(self.root) or self.root
 
     def walk(self) -> Iterator[SourceFile]:
         """Every file to scan, read and ready."""
@@ -185,6 +196,7 @@ class Walker:
             relpath=relpath,
             language=detect(path),
             text=blob.decode("utf-8", errors="replace"),
+            project_path=self._project_path(path, relpath),
         )
 
     def _walk_tree(self) -> Iterator[Path]:
@@ -218,6 +230,15 @@ class Walker:
                     stack.append(entry)
                 elif entry.is_file():
                     yield entry
+
+    def _project_path(self, path: Path, relpath: str) -> str:
+        """Where this file sits in the repository, not in the scan."""
+        if self.project_root == self.root:
+            return relpath
+        try:
+            return path.relative_to(self.project_root).as_posix()
+        except ValueError:
+            return relpath
 
     def _relpath(self, path: Path) -> str:
         """Path as reported in findings: relative to the scan root, POSIX style.
@@ -337,6 +358,22 @@ def path_matches(relpath: str, pattern: str) -> bool:
         return True
 
     return False
+
+
+def _git_toplevel(root: Path) -> Path | None:
+    """The repository root above ``root``, or None outside a checkout."""
+    if not shutil.which("git"):
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return None
+    return Path(proc.stdout.strip())
 
 
 def _git_files(root: Path) -> list[Path] | None:

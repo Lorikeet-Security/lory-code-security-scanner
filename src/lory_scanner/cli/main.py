@@ -6,6 +6,7 @@ import click
 
 from lory_scanner import __version__
 from lory_scanner.cli.describe import describe
+from lory_scanner.cli.init_cmd import init
 from lory_scanner.cli.rules_cmd import rules
 from lory_scanner.cli.scan import scan, sync
 
@@ -25,14 +26,16 @@ def main() -> None:
     GETTING STARTED
     ──────────────────────────────────────────────────────────────────────────
       1.  lory-scan scan                 Scan the current directory.
-      2.  lory-scan scan --diff main     Scan only what your branch changed.
-      3.  lory-scan sync                 Hand the findings to `lory tui`.
+      2.  lory-scan init                 Wire it into this repo, for good.
+      3.  lory-scan scan --diff main     Scan only what your branch changed.
+      4.  lory-scan sync                 Hand the findings to `lory tui`.
 
     \b
     ──────────────────────────────────────────────────────────────────────────
     COMMANDS
     ──────────────────────────────────────────────────────────────────────────
       scan       Scan a path and report findings.
+      init       Set this repository up: config, baseline, hook, CI.
       sync       Scan, and write the findings cache the `lory` TUI reads.
       rules      list / show / validate the detection rules.
       describe   Print the machine-readable integration contract.
@@ -65,6 +68,7 @@ def main() -> None:
     """
 
 
+main.add_command(init)
 main.add_command(scan)
 main.add_command(sync)
 main.add_command(rules)

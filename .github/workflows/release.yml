@@ -1,0 +1,99 @@
+name: Release
+
+# Publishing is tag-driven: pushing v0.1.0 builds that commit and publishes it.
+# Nothing publishes from a branch, so a merge can never ship a release by
+# accident.
+on:
+  push:
+    tags: ["v*"]
+  # For a dry run: builds and checks the artifacts, publishes nothing.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install -e ".[dev]" build twine
+
+      # A release that fails its own tests is worse than a late release.
+      - name: Test
+        run: pytest -q
+
+      - name: Lint
+        run: ruff check src tests
+
+      - name: Validate rules
+        run: lory-scan rules validate
+
+      # The tag is the version. If they disagree, the wheel on PyPI would be
+      # named something nobody can find from the release page.
+      - name: Check the tag matches the package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(python -c 'import tomllib,pathlib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
+          if [ "$tag" != "$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match pyproject version $version"
+            exit 1
+          fi
+          echo "tag and version agree on $version"
+
+      - name: Build
+        run: python -m build
+
+      # Catches a README that renders as raw text on the project page.
+      - name: Check the artifacts
+        run: twine check dist/*
+
+      # Prove the wheel actually works, installed from the artifact rather than
+      # from the checkout — this is what catches a missing package-data entry,
+      # which for this project would mean shipping a scanner with no rules.
+      - name: Smoke-test the built wheel
+        run: |
+          python -m venv /tmp/smoke
+          /tmp/smoke/bin/pip install --quiet dist/*.whl
+          /tmp/smoke/bin/lory-scan --version
+          /tmp/smoke/bin/lory-scan rules validate
+          /tmp/smoke/bin/lory-scan scan examples/vulnerable-app --fail-on never --quiet -f json > /dev/null
+          echo "the wheel scans"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+
+    # Trusted Publishing: PyPI verifies this workflow's OIDC identity, so there
+    # is no API token to store, leak, or rotate. Configure it once at
+    # https://pypi.org/manage/project/lory-code-security-scanner/settings/publishing/
+    # with owner Lorikeet-Security, repo lory-code-security-scanner,
+    # workflow release.yml, environment pypi.
+    environment:
+      name: pypi
+      url: https://pypi.org/p/lory-code-security-scanner
+    permissions:
+      id-token: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1

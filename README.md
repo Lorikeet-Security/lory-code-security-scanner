@@ -43,6 +43,7 @@ lory tui --cached     # triage what it found
 - [What it finds, and what it does not](#what-it-finds-and-what-it-does-not)
 - [Install](#install)
 - [Quick start](#quick-start)
+- [Setting a repository up](#setting-a-repository-up)
 - [Working with the findings TUI](#working-with-the-findings-tui)
 - [Command reference](#command-reference)
 - [Output formats](#output-formats)
@@ -127,6 +128,10 @@ a different tool with different guarantees.
 ## Install
 
 ```bash
+# Recommended: an isolated install, on your PATH.
+pipx install lory-code-security-scanner
+
+# Or into the current environment.
 pip install lory-code-security-scanner
 ```
 
@@ -171,6 +176,36 @@ Exit codes, which are the whole interface in CI:
 | `0` | no findings at or above `--fail-on` (default: `high`) |
 | `1` | findings at or above `--fail-on` |
 | `2` | the scan could not run — bad config, bad rules, unreadable path |
+
+---
+
+## Setting a repository up
+
+One scan tells you where you stand. `init` is what makes it stick:
+
+```bash
+lory-scan init          # asks about each piece
+lory-scan init --yes    # takes the defaults
+```
+
+It writes four things, any of which you can decline:
+
+| | |
+|---|---|
+| `.lory-scan.yml` | a starting policy, with the noisy dials pre-set |
+| `.lory-scan-baseline.json` | everything that exists today, marked known |
+| `.git/hooks/pre-commit` | scans staged files before they are committed |
+| `.github/workflows/security-scan.yml` | scans the diff on every PR, uploads SARIF |
+
+The baseline is the part that matters for adoption. A first scan of a mature
+repository finds a lot of code that predates everyone reading the output; left
+in the way, the whole thing gets ignored. Baselining draws a line under it and
+holds new code to the standard, and because fingerprints ignore line numbers,
+the file does not go stale when someone reformats.
+
+Nothing is overwritten without asking, everything it writes is a plain file you
+can edit, and running it again is safe. Commit the config and the baseline so
+the whole team scans the same way.
 
 ---
 
@@ -290,6 +325,13 @@ also be a single file.
 | `--no-snippets` | Omit source lines from the table view. |
 | `-q, --quiet` | Findings only; no summary. |
 | `-j, --jobs N` | Worker processes. `0` picks from the machine's cores. |
+
+### `lory-scan init [PATH]`
+
+Set a repository up: config, baseline, pre-commit hook, CI workflow. Takes
+`--yes` to accept the defaults, `--no-hook` / `--no-ci` / `--no-baseline` to
+decline a piece, `--fail-on` and `--min-confidence` to set the policy it
+writes, and `--force` to replace files that already exist.
 
 ### `lory-scan sync [PATH]`
 
@@ -678,7 +720,7 @@ Two consequences worth stating plainly:
 ```bash
 pip install -e ".[dev]"
 
-pytest -q                 # 114 tests
+pytest -q                 # 127 tests
 ruff check src tests
 lory-scan rules validate  # compile every rule and run its self-tests
 
@@ -694,6 +736,27 @@ do not copy from it.**
 ```bash
 lory-scan scan examples/vulnerable-app
 ```
+
+### Releasing
+
+Publishing is tag-driven, so nothing ships from a merge by accident:
+
+```bash
+# bump `version` in pyproject.toml, commit, then:
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+The release workflow runs the tests, the linter, and the rule self-tests;
+checks that the tag matches the version in `pyproject.toml`; builds the sdist
+and wheel; installs the built wheel into a clean virtualenv and scans with it —
+which is what catches a packaging mistake such as shipping without the rule
+files — and only then publishes.
+
+PyPI is configured with [Trusted
+Publishing](https://docs.pypi.org/trusted-publishers/), so there is no API
+token stored in this repository to leak or rotate. One-time setup, on the PyPI
+project's publishing settings: owner `Lorikeet-Security`, repository
+`lory-code-security-scanner`, workflow `release.yml`, environment `pypi`.
 
 ---
 

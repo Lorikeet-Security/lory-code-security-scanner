@@ -1,0 +1,419 @@
+# Python.
+#
+# Most of these are sink rules: a function that is dangerous when its argument
+# is attacker-controlled. The scanner cannot see where the argument came from,
+# so the confidence field carries that uncertainty rather than the severity —
+# a command injection is critical whether or not this particular call is
+# reachable.
+
+defaults:
+  languages: [python]
+
+rules:
+  - id: python.subprocess-shell-true
+    title: Subprocess invoked with shell=True
+    severity: high
+    confidence: medium
+    category: injection
+    cwe: 78
+    owasp: "A03:2021 Injection"
+    pattern: 'subprocess\.(?:run|call|check_call|check_output|Popen)\s*\((?:[^()]|\([^()]*\))*shell\s*=\s*True'
+    description: >
+      With shell=True the argument is parsed by /bin/sh, so any shell
+      metacharacter in it — a semicolon, a backtick, $( ) — becomes a second
+      command. Safe only if every part of the string is a literal.
+    remediation: >
+      Pass a list of arguments and drop shell=True: subprocess.run(["git",
+      "clone", url]). If you genuinely need a shell, build the string with
+      shlex.quote() on every interpolated value.
+    references:
+      - https://docs.python.org/3/library/subprocess.html#security-considerations
+    tags: [command-injection]
+    examples:
+      - 'subprocess.run(f"ping {host}", shell=True)'
+    counterexamples:
+      - 'subprocess.run(["ping", "-c", "1", host])'
+
+  - id: python.os-system
+    title: Shell command built and run with os.system
+    severity: high
+    confidence: medium
+    category: injection
+    cwe: 78
+    owasp: "A03:2021 Injection"
+    patterns:
+      - 'os\.system\s*\([^)]*(?:%|\+|\.format\(|f["''])'
+      - 'os\.popen\s*\([^)]*(?:%|\+|\.format\(|f["''])'
+    description: >
+      os.system runs its argument through the shell, and the string here is
+      built by interpolation rather than being a constant.
+    remediation: >
+      Use subprocess.run() with a list of arguments, which never involves a
+      shell and needs no quoting.
+    tags: [command-injection]
+
+  - id: python.eval-exec
+    title: eval or exec on a non-literal expression
+    severity: critical
+    confidence: medium
+    category: injection
+    cwe: 95
+    owasp: "A03:2021 Injection"
+    patterns:
+      - '\beval\s*\([^)]*(?:request|input\(|argv|environ|json|body|param|data)'
+      - '\bexec\s*\([^)]*(?:request|input\(|argv|environ|json|body|param|data)'
+    description: >
+      eval and exec compile and run arbitrary Python. Reaching either with any
+      part of a request is remote code execution, not merely injection.
+    remediation: >
+      There is almost always a narrower tool: ast.literal_eval for data,
+      json.loads for JSON, a dict lookup for dispatch. If you are running
+      user-supplied code deliberately, it needs a sandboxed process, not a
+      safer eval.
+    tags: [rce]
+
+  - id: python.pickle-loads
+    title: Untrusted data deserialised with pickle
+    severity: critical
+    confidence: medium
+    category: deserialization
+    cwe: 502
+    owasp: "A08:2021 Software and Data Integrity Failures"
+    patterns:
+      - 'pickle\.loads?\s*\('
+      - 'cPickle\.loads?\s*\('
+      - '_pickle\.loads?\s*\('
+      - 'dill\.loads?\s*\('
+      - 'shelve\.open\s*\('
+    description: >
+      Unpickling constructs arbitrary objects and calls arbitrary code by
+      design — a malicious pickle is a shell, not a corrupt file. Pickle is
+      safe only for data you produced and stored where nobody else can write.
+    remediation: >
+      Use JSON, MessagePack, or Protobuf for anything that crosses a trust
+      boundary. If pickle is unavoidable, sign the payload and verify the
+      signature before it reaches loads().
+    references:
+      - https://docs.python.org/3/library/pickle.html
+    tags: [rce, deserialization]
+    examples:
+      - 'pickle.loads(payload)'
+    counterexamples:
+      - 'json.loads(payload)'
+
+  - id: python.yaml-unsafe-load
+    title: YAML parsed with an unsafe loader
+    severity: critical
+    confidence: high
+    category: deserialization
+    cwe: 502
+    owasp: "A08:2021 Software and Data Integrity Failures"
+    patterns:
+      - 'yaml\.load\s*\((?![^)]*Loader\s*=\s*(?:yaml\.)?(?:Safe|Base|C?Safe)Loader)'
+      - 'yaml\.unsafe_load\s*\('
+      - 'yaml\.load_all\s*\((?![^)]*Loader\s*=\s*(?:yaml\.)?Safe)'
+    description: >
+      yaml.load with the default loader instantiates arbitrary Python objects
+      via tags such as !!python/object/apply, which makes a YAML document a
+      code-execution vector.
+    remediation: >
+      Use yaml.safe_load(), or pass Loader=yaml.SafeLoader explicitly. Nothing
+      you parse from a file, an API, or a config a user can edit should go
+      through the unsafe loader.
+    tags: [rce, deserialization]
+    examples:
+      - 'yaml.load(request.data)'
+    counterexamples:
+      - 'yaml.safe_load(request.data)'
+      - 'yaml.load(data, Loader=yaml.SafeLoader)'
+
+  - id: python.sql-string-building
+    title: SQL query assembled by string building
+    severity: high
+    confidence: medium
+    category: injection
+    cwe: 89
+    owasp: "A03:2021 Injection"
+    patterns:
+      - '(?:execute|executemany|executescript)\s*\(\s*(?:f["'']|["''][^"'']*["'']\s*(?:%|\+|\.format\())'
+      - '(?:cursor|conn|db|session)\.execute\s*\([^)]*(?:%\s*\(|\+\s*(?:str\()?(?:request|user|param))'
+      - '(?:SELECT|INSERT|UPDATE|DELETE)\b[^"''\n]{0,300}["'']\s*(?:%|\+)\s*'
+    description: >
+      The query text is concatenated or formatted rather than parameterised,
+      so a value containing a quote changes the statement's structure.
+    remediation: >
+      Pass parameters to the driver instead of interpolating them:
+      cursor.execute("SELECT * FROM users WHERE id = %s", (user_id,)). The
+      placeholder syntax varies by driver; the principle does not.
+    references:
+      - https://cwe.mitre.org/data/definitions/89.html
+    tags: [sqli]
+
+  - id: python.django-raw-sql
+    title: Django raw SQL with an interpolated string
+    severity: high
+    confidence: medium
+    category: injection
+    cwe: 89
+    patterns:
+      - '\.raw\s*\(\s*(?:f["'']|["''][^"'']*["'']\s*(?:%|\+|\.format\())'
+      - 'RawSQL\s*\(\s*(?:f["'']|["''][^"'']*["'']\s*(?:%|\+|\.format\())'
+      - '\.extra\s*\([^)]*(?:%|\+|\.format\(|f["''])'
+    description: >
+      Django's raw(), RawSQL(), and extra() hand the string to the database
+      unchanged; only their params argument is escaped.
+    remediation: >
+      Pass values through the params argument — Model.objects.raw("… WHERE id =
+      %s", [user_id]) — or express the query with the ORM.
+    tags: [sqli, django]
+
+  - id: python.requests-verify-false
+    title: TLS certificate verification disabled
+    severity: high
+    confidence: high
+    category: crypto
+    cwe: 295
+    owasp: "A02:2021 Cryptographic Failures"
+    patterns:
+      - 'verify\s*=\s*False'
+      - 'ssl\._create_unverified_context\s*\('
+      - 'ssl\.CERT_NONE'
+    description: >
+      With verification off, the client accepts any certificate, so a
+      network-positioned attacker can read and rewrite the traffic. TLS
+      without verification provides encryption but no authentication, which
+      is not much protection.
+    remediation: >
+      Leave verification on. If the server uses an internal CA, point verify=
+      at that CA bundle rather than switching the check off. If the
+      certificate is expired or misissued, fix the certificate.
+    references:
+      - https://cwe.mitre.org/data/definitions/295.html
+    tags: [tls]
+    examples:
+      - 'requests.get(url, verify=False)'
+    counterexamples:
+      - 'requests.get(url, verify="/etc/ssl/ca.pem")'
+
+  - id: python.weak-hash
+    title: Weak hash algorithm
+    severity: medium
+    confidence: medium
+    category: crypto
+    cwe: 327
+    owasp: "A02:2021 Cryptographic Failures"
+    patterns:
+      - 'hashlib\.(?:md5|sha1)\s*\('
+      - 'hashlib\.new\s*\(\s*["''](?:md5|sha1)["'']'
+    not_patterns:
+      - 'usedforsecurity\s*=\s*False'
+    description: >
+      MD5 and SHA-1 have practical collision attacks and are far too fast for
+      password storage. Both are still fine for non-security uses such as
+      cache keys — mark those with usedforsecurity=False.
+    remediation: >
+      For integrity and signatures use SHA-256 or better. For passwords use a
+      dedicated KDF — argon2, scrypt, or bcrypt — never a raw hash.
+    tags: [crypto]
+    examples:
+      - 'hashlib.md5(password.encode())'
+    counterexamples:
+      - 'hashlib.md5(data, usedforsecurity=False)'
+      - 'hashlib.sha256(data)'
+
+  - id: python.weak-random-for-secrets
+    title: Predictable randomness used for a security value
+    severity: high
+    confidence: medium
+    category: crypto
+    cwe: 338
+    owasp: "A02:2021 Cryptographic Failures"
+    pattern: '(?i)(?:token|secret|password|passwd|salt|nonce|otp|key|session|reset)\w*\s*=\s*(?:["'']?\s*)?random\.(?:random|randint|choice|choices|randrange|sample|shuffle)\s*\('
+    description: >
+      random is a Mersenne Twister seeded from the clock. Its output is
+      reproducible: observing a few values reveals the state and therefore
+      every value it will produce next.
+    remediation: >
+      Use the secrets module — secrets.token_urlsafe(), secrets.token_hex(),
+      secrets.choice() — which draws from the OS CSPRNG.
+    tags: [crypto, randomness]
+    examples:
+      - 'token = random.choice(alphabet)'
+    counterexamples:
+      - 'token = secrets.token_urlsafe(32)'
+
+  - id: python.flask-debug-true
+    title: Flask debug mode enabled
+    severity: high
+    confidence: high
+    category: config
+    cwe: 489
+    owasp: "A05:2021 Security Misconfiguration"
+    patterns:
+      - 'app\.run\s*\([^)]*debug\s*=\s*True'
+      - '(?:DEBUG|FLASK_DEBUG)\s*[:=]\s*True'
+    description: >
+      Flask's debugger exposes an interactive Python console on unhandled
+      exceptions. If the reloader PIN is guessed or disabled, that console is
+      remote code execution for anyone who can trigger an error.
+    remediation: >
+      Read debug from an environment variable that defaults to off, and never
+      enable it on a host reachable from outside your machine.
+    tags: [flask, debug]
+    examples:
+      - 'app.run(debug=True)'
+    counterexamples:
+      - 'app.run(debug=False)'
+
+  - id: python.django-debug-true
+    title: Django DEBUG enabled
+    severity: high
+    confidence: medium
+    category: config
+    cwe: 489
+    owasp: "A05:2021 Security Misconfiguration"
+    pattern: '^\s*DEBUG\s*=\s*True'
+    paths: ["**/settings*.py", "**/settings/*.py", "**/config/*.py"]
+    description: >
+      With DEBUG on, Django serves a full traceback page including settings,
+      SQL, and local variables to anyone who triggers an error.
+    remediation: >
+      DEBUG = os.environ.get("DJANGO_DEBUG") == "1", defaulting to False, and
+      set ALLOWED_HOSTS explicitly.
+    tags: [django, debug]
+
+  - id: python.assert-for-authorization
+    title: Security check written as an assert
+    severity: medium
+    confidence: low
+    category: authz
+    cwe: 617
+    pattern: '\bassert\s+(?:\w+\.)*(?:is_admin|is_authenticated|is_staff|has_perm|can_|is_owner|user\.is_)'
+    description: >
+      assert statements are removed entirely when Python runs with -O, so an
+      authorisation check written as an assert silently disappears in an
+      optimised deployment.
+    remediation: >
+      Use an explicit if with a raised exception or an HTTP 403 response.
+      Reserve assert for internal invariants that are not security controls.
+    tags: [authz]
+
+  - id: python.tempfile-mktemp
+    title: Insecure temporary file creation
+    severity: medium
+    confidence: high
+    category: files
+    cwe: 377
+    pattern: 'tempfile\.mktemp\s*\('
+    description: >
+      mktemp returns a name, not a file. Between the name being returned and
+      your code creating it, another process can create that path — commonly
+      as a symlink to a file it wants you to overwrite.
+    remediation: >
+      Use tempfile.NamedTemporaryFile(), mkstemp(), or TemporaryDirectory(),
+      all of which create the file atomically with safe permissions.
+    tags: [tmpfile, race]
+    examples:
+      - 'path = tempfile.mktemp()'
+    counterexamples:
+      - 'path = tempfile.mkstemp()'
+
+  - id: python.path-traversal-join
+    title: Filesystem path built from request data
+    severity: high
+    confidence: low
+    category: path-traversal
+    cwe: 22
+    owasp: "A01:2021 Broken Access Control"
+    patterns:
+      - '(?:open|os\.path\.join|Path)\s*\([^)]*(?:request\.(?:args|form|json|values|GET|POST)|params\[|query_params)'
+      - 'send_file\s*\([^)]*(?:request\.|params\[)'
+    description: >
+      A path assembled from request data can be steered out of its intended
+      directory with ../ segments, an absolute path, or an encoded separator.
+    remediation: >
+      Resolve the joined path and confirm it is still inside the base
+      directory before opening it — compare Path(base).resolve() against
+      candidate.resolve().parents — or index a whitelist by an opaque id
+      instead of accepting a filename.
+    tags: [traversal]
+
+  - id: python.xxe-parser
+    title: XML parsed with entity resolution enabled
+    severity: high
+    confidence: medium
+    category: xxe
+    cwe: 611
+    owasp: "A05:2021 Security Misconfiguration"
+    patterns:
+      - 'etree\.(?:parse|fromstring|XMLParser)\s*\((?![^)]*resolve_entities\s*=\s*False)'
+      - 'xml\.dom\.minidom\.parse'
+      - 'xml\.sax\.(?:parse|make_parser)'
+    description: >
+      A parser that resolves external entities will fetch files and URLs named
+      in the document — the classic route to reading /etc/passwd or making the
+      server issue internal requests.
+    remediation: >
+      Parse untrusted XML with defusedxml, or configure the parser with
+      resolve_entities=False and no DTD loading.
+    references:
+      - https://cwe.mitre.org/data/definitions/611.html
+    tags: [xxe]
+
+  - id: python.ssrf-request-from-input
+    title: Outbound request to a URL from user input
+    severity: high
+    confidence: low
+    category: ssrf
+    cwe: 918
+    owasp: "A10:2021 Server-Side Request Forgery"
+    patterns:
+      - 'requests\.(?:get|post|put|delete|head|patch|request)\s*\([^)]*(?:request\.(?:args|form|json|values|GET|POST)|params\[)'
+      - 'urlopen\s*\([^)]*(?:request\.|params\[)'
+      - 'httpx\.(?:get|post|Client)\s*\([^)]*request\.'
+    description: >
+      The server fetches a URL the caller chose. That reaches your internal
+      network, cloud metadata endpoints, and localhost services that trust
+      being unreachable from outside.
+    remediation: >
+      Validate against an allowlist of hosts, resolve the name and reject
+      private and link-local addresses before connecting, and disable
+      redirects — a redirect is the usual way an allowlist gets bypassed.
+    tags: [ssrf]
+
+  - id: python.jinja-autoescape-off
+    title: Template autoescaping disabled
+    severity: high
+    confidence: high
+    category: xss
+    cwe: 79
+    owasp: "A03:2021 Injection"
+    patterns:
+      - 'autoescape\s*=\s*False'
+      - 'Environment\s*\((?![^)]*autoescape)[^)]*loader'
+    description: >
+      With autoescaping off, every variable rendered into HTML is a potential
+      XSS sink, and staying safe depends on remembering |e on every one.
+    remediation: >
+      Use Environment(autoescape=True) — or select_autoescape() — and mark the
+      few genuinely trusted fragments with |safe individually.
+    tags: [xss, jinja]
+
+  - id: python.hardcoded-password-argument
+    title: Password passed as a literal
+    severity: high
+    confidence: low
+    category: secrets
+    cwe: 798
+    pattern: '(?i)(?:password|passwd|pwd|secret|token)\s*=\s*["''][^"''\s${}]{6,}["'']'
+    not_patterns:
+      - '(?i)(?:example|changeme|your|placeholder|dummy|test|fake|xxx|\.\.\.|password["'']|<)'
+      - '(?i)password\s*=\s*["''](?:password|secret|123456|admin)["'']'
+      - 'os\.environ|getenv|config\[|settings\.|input\('
+    description: >
+      A credential written into the source is shared with everyone who can
+      read the repository, and cannot be rotated without a deploy.
+    remediation: >
+      Read it from the environment or a secret manager at runtime. If this is
+      a test fixture, keep it obviously fake so it does not read as real.
+    tags: [credential]

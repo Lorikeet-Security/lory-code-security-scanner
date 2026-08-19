@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      - name: Lint
+        run: ruff check src tests
+
+      - name: Test
+        run: pytest -q
+
+      # Every bundled rule compiles, has a unique id, and carries the metadata
+      # the report formats require. A malformed rule fails here, not on a user's
+      # first scan.
+      - name: Validate bundled rules
+        run: lory-scan rules validate
+
+      # The scanner scans itself. Findings in the fixtures are expected, so the
+      # tree that matters is src/.
+      - name: Self-scan
+        run: lory-scan scan src --fail-on medium

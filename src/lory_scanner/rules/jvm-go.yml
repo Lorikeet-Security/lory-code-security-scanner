@@ -1,0 +1,324 @@
+# Java, Kotlin, Go, C#, and Ruby.
+#
+# One file rather than five, because the rule count per language is small and
+# the failure modes are shared: a driver that takes a string, a deserialiser
+# that constructs types, a TLS check turned off to make a test pass.
+
+rules:
+  # ── Java / Kotlin ──────────────────────────────────────────────────────────
+  - id: java.sql-concatenation
+    title: SQL statement built by concatenation
+    severity: high
+    confidence: medium
+    category: injection
+    cwe: 89
+    owasp: "A03:2021 Injection"
+    languages: [java, kotlin, scala]
+    patterns:
+      - '(?:createStatement|executeQuery|executeUpdate|execute)\s*\([^)]*\+\s*\w'
+      - '(?:SELECT|INSERT|UPDATE|DELETE)\b[^"]*"\s*\+\s*\w'
+      - 'createQuery\s*\(\s*"[^"]*"\s*\+'
+    description: >
+      Statement with a concatenated string is injectable; PreparedStatement
+      with placeholders is not.
+    remediation: >
+      Use PreparedStatement with ? placeholders and setString/setInt. In JPA,
+      use named parameters and setParameter rather than string concatenation.
+    tags: [sqli]
+
+  - id: java.deserialization
+    title: Java native deserialisation of untrusted data
+    severity: critical
+    confidence: medium
+    category: deserialization
+    cwe: 502
+    owasp: "A08:2021 Software and Data Integrity Failures"
+    languages: [java, kotlin, scala]
+    patterns:
+      - 'new\s+ObjectInputStream\s*\('
+      - '\.readObject\s*\(\s*\)'
+      - 'XMLDecoder\s*\('
+    description: >
+      readObject constructs objects and runs their readObject and readResolve
+      methods before your code sees them. With a gadget chain on the classpath
+      — Commons Collections being the classic — that is code execution.
+    remediation: >
+      Use a data format that does not construct arbitrary types: JSON with an
+      explicit target class, or Protobuf. If native serialisation must stay,
+      apply an ObjectInputFilter allowlist.
+    tags: [rce, deserialization]
+    examples:
+      - 'new ObjectInputStream(input)'
+    counterexamples:
+      - 'new ByteArrayInputStream(input)'
+
+  - id: java.runtime-exec
+    title: Runtime.exec on a built string
+    severity: high
+    confidence: medium
+    category: injection
+    cwe: 78
+    languages: [java, kotlin, scala]
+    patterns:
+      - 'Runtime\.getRuntime\s*\(\s*\)\s*\.exec\s*\([^)]*\+'
+      - 'ProcessBuilder\s*\([^)]*\+\s*\w'
+    description: >
+      The command string is assembled from variables. Where those come from
+      decides whether this is command injection.
+    remediation: >
+      Pass a String[] of arguments so no shell parsing occurs, and validate any
+      value that reaches the argument list.
+    tags: [command-injection]
+
+  - id: java.xxe-parser
+    title: XML parser without external entity protection
+    severity: high
+    confidence: medium
+    category: xxe
+    cwe: 611
+    languages: [java, kotlin, scala]
+    patterns:
+      - 'DocumentBuilderFactory\.newInstance\s*\(\s*\)'
+      - 'SAXParserFactory\.newInstance\s*\(\s*\)'
+      - 'XMLInputFactory\.newInstance\s*\(\s*\)'
+    not_requires: 'setFeature|XMLConstants\.FEATURE_SECURE_PROCESSING|setExpandEntityReferences'
+    description: >
+      These factories resolve external entities by default, so a document can
+      make the parser read local files or issue outbound requests.
+    remediation: >
+      Disable DTDs on the factory: setFeature(
+      "http://apache.org/xml/features/disallow-doctype-decl", true), and set
+      FEATURE_SECURE_PROCESSING.
+    tags: [xxe]
+
+  - id: java.trust-all-certificates
+    title: TLS trust manager that accepts every certificate
+    severity: critical
+    confidence: high
+    category: crypto
+    cwe: 295
+    languages: [java, kotlin, scala]
+    patterns:
+      - 'checkServerTrusted\s*\([^)]*\)\s*(?:throws [\w.]+\s*)?\{\s*\}'
+      - 'ALLOW_ALL_HOSTNAME_VERIFIER'
+      - 'setHostnameVerifier\s*\([^)]*return\s+true'
+    description: >
+      An empty checkServerTrusted accepts any certificate from anyone, which
+      removes authentication from TLS entirely. These are usually added to get
+      past a self-signed certificate in a test environment and then shipped.
+    remediation: >
+      Trust the specific CA instead: load it into a KeyStore and build the
+      TrustManager from that.
+    tags: [tls]
+
+  - id: java.weak-cipher
+    title: Weak cipher or mode
+    severity: high
+    confidence: high
+    category: crypto
+    cwe: 327
+    languages: [java, kotlin, scala]
+    patterns:
+      - 'Cipher\.getInstance\s*\(\s*"(?:DES|DESede|RC2|RC4|Blowfish)'
+      - 'Cipher\.getInstance\s*\(\s*"[^"]*/ECB/'
+      - 'MessageDigest\.getInstance\s*\(\s*"(?:MD5|SHA-?1)"'
+    description: >
+      DES and RC4 are broken. ECB mode encrypts identical plaintext blocks to
+      identical ciphertext, so structure survives encryption.
+    remediation: >
+      Use AES/GCM/NoPadding with a unique 96-bit IV per message, and SHA-256
+      or better for digests.
+    tags: [crypto]
+
+  - id: java.spring-csrf-disabled
+    title: Spring Security CSRF protection disabled
+    severity: high
+    confidence: high
+    category: csrf
+    cwe: 352
+    owasp: "A01:2021 Broken Access Control"
+    languages: [java, kotlin]
+    pattern: 'csrf\s*\(\s*\)\s*\.disable\s*\(\s*\)'
+    description: >
+      With CSRF protection off, any site can make a logged-in user's browser
+      submit a state-changing request to your application.
+    remediation: >
+      Leave it enabled for cookie-authenticated endpoints. It is only safely
+      disabled for a stateless API that authenticates with a header token and
+      never with a cookie.
+    tags: [csrf, spring]
+
+  # ── Go ─────────────────────────────────────────────────────────────────────
+  - id: go.sql-concatenation
+    title: SQL query built with fmt.Sprintf or concatenation
+    severity: high
+    confidence: medium
+    category: injection
+    cwe: 89
+    languages: [go]
+    patterns:
+      - '(?:Query|QueryRow|Exec)(?:Context)?\s*\(\s*(?:[^,)]*,\s*)?fmt\.Sprintf\s*\('
+      - '(?:Query|QueryRow|Exec)(?:Context)?\s*\([^)]*"\s*\+\s*\w'
+    description: >
+      database/sql supports placeholders; Sprintf into the query text bypasses
+      them and reintroduces injection.
+    remediation: >
+      Pass values as arguments: db.Query("SELECT * FROM users WHERE id = $1",
+      id). Use pq.QuoteIdentifier for the rare dynamic identifier.
+    tags: [sqli]
+
+  - id: go.command-injection
+    title: Command built from a formatted string
+    severity: high
+    confidence: medium
+    category: injection
+    cwe: 78
+    languages: [go]
+    patterns:
+      - 'exec\.Command(?:Context)?\s*\(\s*"(?:sh|bash|zsh|cmd)"\s*,\s*"-c"'
+      - 'exec\.Command(?:Context)?\s*\([^)]*fmt\.Sprintf'
+    description: >
+      exec.Command with sh -c reintroduces shell parsing, which the argument
+      array form otherwise avoids entirely.
+    remediation: >
+      Call the binary directly with its arguments as separate strings, and
+      keep sh -c for commands with no interpolated values.
+    tags: [command-injection]
+
+  - id: go.tls-insecure-skip-verify
+    title: TLS verification disabled
+    severity: high
+    confidence: high
+    category: crypto
+    cwe: 295
+    languages: [go]
+    pattern: 'InsecureSkipVerify\s*:\s*true'
+    description: >
+      The client accepts any certificate, which removes the authentication
+      half of TLS.
+    remediation: >
+      Add the internal CA to the RootCAs pool instead. Keep
+      InsecureSkipVerify for tests that never build a production binary.
+    tags: [tls]
+    examples:
+      - 'InsecureSkipVerify: true'
+    counterexamples:
+      - 'InsecureSkipVerify: false'
+
+  - id: go.weak-random
+    title: math/rand used for a security value
+    severity: high
+    confidence: medium
+    category: crypto
+    cwe: 338
+    languages: [go]
+    pattern: '(?i)(?:token|secret|key|password|salt|nonce|session)\w*\s*(?::=|=)\s*[^;\n]*rand\.(?:Int|Intn|Int31|Int63|Float|Read|Perm)'
+    not_patterns:
+      - 'crypto/rand'
+    description: >
+      math/rand is deterministic given its seed and is not suitable for
+      anything an attacker should not be able to predict.
+    remediation: Use crypto/rand.Read, which draws from the OS CSPRNG.
+    tags: [randomness]
+
+  # ── C# ─────────────────────────────────────────────────────────────────────
+  - id: csharp.sql-concatenation
+    title: SQL command built by concatenation
+    severity: high
+    confidence: medium
+    category: injection
+    cwe: 89
+    languages: [csharp]
+    patterns:
+      - 'new\s+Sql(?:Command|DataAdapter)\s*\(\s*(?:"[^"]*"\s*\+|\$")'
+      - 'CommandText\s*=\s*(?:"[^"]*"\s*\+|\$")'
+    description: >
+      String concatenation and interpolated $"…" strings both put the value
+      into the SQL text rather than into a parameter.
+    remediation: >
+      Use command.Parameters.AddWithValue, or Entity Framework's parameterised
+      LINQ. FromSqlInterpolated is also safe; FromSqlRaw with an interpolated
+      string is not.
+    tags: [sqli]
+
+  - id: csharp.binary-formatter
+    title: BinaryFormatter deserialisation
+    severity: critical
+    confidence: high
+    category: deserialization
+    cwe: 502
+    languages: [csharp]
+    patterns:
+      - 'new\s+BinaryFormatter\s*\('
+      - 'LosFormatter|NetDataContractSerializer|SoapFormatter'
+    description: >
+      BinaryFormatter is unsafe by design and deprecated by Microsoft — a
+      crafted payload runs code during deserialisation.
+    remediation: >
+      Use System.Text.Json or a contract-based serialiser with known types.
+      Microsoft's guidance is to remove BinaryFormatter entirely.
+    tags: [rce, deserialization]
+
+  # ── Ruby ───────────────────────────────────────────────────────────────────
+    examples:
+      - 'new BinaryFormatter()'
+    counterexamples:
+      - 'JsonSerializer.Deserialize<T>(json)'
+  - id: ruby.sql-interpolation
+    title: SQL fragment with string interpolation
+    severity: high
+    confidence: medium
+    category: injection
+    cwe: 89
+    languages: [ruby]
+    patterns:
+      - '(?:where|find_by_sql|execute|select_all)\s*\(\s*"[^"]*#\{'
+      - 'where\s*\(\s*"[^"]*"\s*\+'
+    description: >
+      Interpolating into an ActiveRecord condition string bypasses the
+      parameter binding that the array and hash forms provide.
+    remediation: >
+      Use the array form — where("id = ?", id) — or the hash form,
+      where(id: id).
+    tags: [sqli, rails]
+
+  - id: ruby.command-interpolation
+    title: Shell command with interpolation
+    severity: high
+    confidence: medium
+    category: injection
+    cwe: 78
+    languages: [ruby]
+    patterns:
+      - '`[^`]*#\{'
+      - 'system\s*\(\s*"[^"]*#\{'
+      - '(?:%x|exec|spawn)\s*[\(\{][^)}]*#\{'
+    description: >
+      Backticks, system with one string, and %x all go through a shell, so an
+      interpolated value can add another command.
+    remediation: >
+      Pass the command and its arguments as separate strings — system("git",
+      "clone", url) — which skips the shell.
+    tags: [command-injection]
+
+  - id: ruby.yaml-unsafe-load
+    title: YAML loaded with object construction enabled
+    severity: critical
+    confidence: high
+    category: deserialization
+    cwe: 502
+    languages: [ruby]
+    patterns:
+      - 'YAML\.(?:unsafe_)?load\s*\((?![^)]*safe)'
+      - 'Marshal\.load\s*\('
+    description: >
+      Psych's load and Marshal.load both instantiate arbitrary Ruby objects,
+      which is a code-execution path with the right gadget in scope.
+    remediation: >
+      Use YAML.safe_load with an explicit permitted_classes list, and JSON for
+      anything crossing a trust boundary.
+    tags: [rce, deserialization]
+    examples:
+      - 'YAML.load(params[:doc])'
+    counterexamples:
+      - 'YAML.safe_load(params[:doc])'

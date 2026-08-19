@@ -1,0 +1,319 @@
+# PHP.
+#
+# PHP's superglobals make taint unusually visible: $_GET, $_POST, $_REQUEST,
+# and $_COOKIE are unambiguously attacker-controlled, so rules that mention one
+# of them can be far more confident than their equivalents in other languages.
+
+defaults:
+  languages: [php]
+
+rules:
+  - id: php.sql-superglobal-in-query
+    title: SQL query containing a superglobal
+    severity: critical
+    confidence: high
+    category: injection
+    cwe: 89
+    owasp: "A03:2021 Injection"
+    patterns:
+      - '(?:mysqli?_query|->query|->exec|pg_query)\s*\([^)]*\$_(?:GET|POST|REQUEST|COOKIE)'
+      - '(?:SELECT|INSERT|UPDATE|DELETE)[^;\n]{0,300}["'']\s*\.\s*\$_(?:GET|POST|REQUEST|COOKIE)'
+      - '(?:SELECT|INSERT|UPDATE|DELETE)[^;\n]{0,300}\{?\$_(?:GET|POST|REQUEST|COOKIE)\['
+    prefilters: ['$_get', '$_post', '$_request', '$_cookie']
+    description: >
+      Request data is concatenated into a SQL statement. This is SQL injection
+      with no further conditions attached — the value is attacker-controlled by
+      definition.
+    remediation: >
+      Use a prepared statement and bind the value: $stmt = $pdo->prepare(
+      "SELECT * FROM users WHERE id = ?"); $stmt->execute([$id]); Escaping
+      functions are not a substitute — they miss numeric and identifier
+      contexts.
+    references:
+      - https://www.php.net/manual/en/pdo.prepared-statements.php
+    tags: [sqli]
+    examples:
+      - '$r = mysqli_query($c, "SELECT * FROM t WHERE id = " . $_GET[''id'']);'
+    counterexamples:
+      - '$r = mysqli_query($c, "SELECT * FROM t WHERE id = ?");'
+
+  - id: php.sql-string-concat
+    title: SQL query assembled by concatenation
+    severity: high
+    confidence: medium
+    category: injection
+    cwe: 89
+    patterns:
+      - '(?:mysqli?_query|->query|->exec|pg_query)\s*\([^)\n]{0,300}\.\s*\$'
+      - '\$(?:sql|query|stmt)\s*=\s*["''][^"'']*(?:SELECT|INSERT|UPDATE|DELETE)[^"'']*["'']\s*\.'
+    prefilters: [_query, '->query', '->exec', '$sql', '$query', '$stmt']
+    description: >
+      The query text is built from variables. Whether it is exploitable
+      depends on where those variables came from, which is worth confirming.
+    remediation: >
+      Prepare the statement and bind parameters rather than concatenating.
+    tags: [sqli]
+    examples:
+      - 'mysqli_query($conn, "SELECT * FROM t WHERE x = " . $var);'
+
+  - id: php.command-execution
+    title: Shell command built from a variable
+    severity: critical
+    confidence: high
+    category: injection
+    cwe: 78
+    owasp: "A03:2021 Injection"
+    patterns:
+      - '(?:system|exec|shell_exec|passthru|popen|proc_open|pcntl_exec)\s*\([^)\n]{0,300}\$_(?:GET|POST|REQUEST|COOKIE)'
+      - '`[^`\n]{0,300}\$_(?:GET|POST|REQUEST)'
+    prefilters: ['$_get', '$_post', '$_request', '$_cookie']
+    description: >
+      Request data reaches a shell. Any metacharacter in it starts a second
+      command as the web server user.
+    remediation: >
+      Avoid the shell. Where a command is unavoidable, pass arguments through
+      escapeshellarg() individually — escapeshellcmd() on the whole string is
+      not equivalent and is frequently bypassed.
+    tags: [command-injection, rce]
+    examples:
+      - 'system("ping -c 1 " . $_GET["host"]);'
+    counterexamples:
+      - 'system("uptime");'
+
+  - id: php.file-inclusion
+    title: File included from a variable path
+    severity: critical
+    confidence: high
+    category: path-traversal
+    cwe: 98
+    owasp: "A03:2021 Injection"
+    pattern: '(?:include|include_once|require|require_once)\s*\(?\s*[^;\n]{0,200}\$_(?:GET|POST|REQUEST|COOKIE)'
+    prefilters: ['$_get', '$_post', '$_request', '$_cookie']
+    description: >
+      Local file inclusion: the caller chooses which file is executed as PHP.
+      With an upload, a log file, or a data: wrapper in reach, this is remote
+      code execution.
+    remediation: >
+      Map an opaque identifier to a fixed list of files. Never let a request
+      value reach an include path, even after filtering — the filters for this
+      are routinely bypassed with encoding and null bytes.
+    tags: [lfi, rce]
+    examples:
+      - 'include($_GET["page"] . ".php");'
+    counterexamples:
+      - 'include("header.php");'
+
+  - id: php.unserialize-user-input
+    title: unserialize on request data
+    severity: critical
+    confidence: high
+    category: deserialization
+    cwe: 502
+    owasp: "A08:2021 Software and Data Integrity Failures"
+    pattern: 'unserialize\s*\([^)]*\$_(?:GET|POST|REQUEST|COOKIE)'
+    prefilters: [unserialize]
+    description: >
+      unserialize instantiates arbitrary classes and triggers magic methods
+      such as __wakeup and __destruct. With a suitable class in scope this is
+      a POP chain to code execution.
+    remediation: >
+      Use json_decode for data crossing a trust boundary. If PHP serialisation
+      is required, pass allowed_classes and sign the payload.
+    tags: [rce, deserialization]
+    examples:
+      - '$prefs = unserialize($_COOKIE["prefs"]);'
+    counterexamples:
+      - '$prefs = json_decode($_COOKIE["prefs"]);'
+
+  - id: php.echo-superglobal
+    title: Request data echoed into the page
+    severity: high
+    confidence: high
+    category: xss
+    cwe: 79
+    owasp: "A03:2021 Injection"
+    patterns:
+      - '(?:echo|print)\s+[^;\n]{0,300}\$_(?:GET|POST|REQUEST|COOKIE)'
+      - '<\?=\s*\$_(?:GET|POST|REQUEST|COOKIE)'
+    prefilters: ['$_get', '$_post', '$_request', '$_cookie']
+    not_patterns:
+      - 'htmlspecialchars|htmlentities|strip_tags|filter_var|urlencode|json_encode'
+    description: >
+      Request data written into HTML without encoding is reflected XSS.
+    remediation: >
+      Wrap the value in htmlspecialchars($v, ENT_QUOTES | ENT_SUBSTITUTE,
+      'UTF-8'). Inside a JavaScript block, use json_encode instead — HTML
+      encoding is the wrong escaping for that context.
+    tags: [xss]
+    examples:
+      - 'echo "Hello " . $_GET["name"];'
+    counterexamples:
+      - 'echo htmlspecialchars($_GET["name"]);'
+
+  - id: php.weak-crypto
+    title: Weak or reversible cryptography
+    severity: medium
+    confidence: medium
+    category: crypto
+    cwe: 327
+    patterns:
+      - '\b(?:md5|sha1)\s*\(\s*\$(?:password|passwd|pass|pwd)'
+      - 'mcrypt_(?:encrypt|decrypt)\s*\('
+      - '["''](?:aes-\d+-)?ecb["'']'
+    prefilters: [md5, sha1, mcrypt, ecb]
+    description: >
+      MD5 and SHA-1 are far too fast for password storage and both have
+      collision attacks. mcrypt is removed from modern PHP, and ECB mode
+      leaks structure because identical plaintext blocks encrypt identically.
+    remediation: >
+      Hash passwords with password_hash() and check with password_verify().
+      For encryption use sodium_crypto_secretbox() or AES-GCM via OpenSSL.
+    tags: [crypto]
+    examples:
+      - '$h = md5($password);'
+      - 'mcrypt_encrypt($k, $d);'
+    counterexamples:
+      - '$h = password_hash($password, PASSWORD_DEFAULT);'
+
+  - id: php.md5-password-comparison
+    title: Password compared with a non-constant-time operator
+    severity: medium
+    confidence: medium
+    category: crypto
+    cwe: 208
+    pattern: '(?:if|while)\s*\([^)\n]{0,200}\$(?:password|passwd|hash|token|signature|sig)\w*\s*(?:===?|!==?)\s*'
+    prefilters: ['$password', '$passwd', '$hash', '$token', '$signature', '$sig']
+    not_patterns:
+      - 'hash_equals|password_verify'
+    description: >
+      == and === on a secret return as soon as they find a difference, so the
+      time taken reveals how much of the value was correct. == is worse still:
+      PHP's loose comparison treats two "0e…" strings as equal numbers, which
+      makes some hashes compare equal to each other.
+    remediation: >
+      Use hash_equals() for tokens and signatures, and password_verify() for
+      passwords.
+    tags: [timing, crypto]
+    examples:
+      - 'if ($hash === $expected) {'
+    counterexamples:
+      - 'if (hash_equals($hash, $expected)) {'
+
+  - id: php.display-errors-on
+    title: Error display enabled
+    severity: medium
+    confidence: high
+    category: config
+    cwe: 209
+    owasp: "A05:2021 Security Misconfiguration"
+    patterns:
+      - 'ini_set\s*\(\s*["'']display_errors["'']\s*,\s*["'']?(?:1|on|true)'
+      - 'error_reporting\s*\(\s*E_ALL\s*\)'
+    description: >
+      Displayed errors leak absolute paths, SQL fragments, and library
+      versions to whoever triggers them.
+    remediation: >
+      Turn display_errors off in production and log instead. Keep it on only
+      in a development configuration that never ships.
+    tags: [info-leak]
+
+  - id: php.file-upload-no-validation
+    title: Uploaded file moved without checking its type
+    severity: high
+    confidence: medium
+    category: files
+    cwe: 434
+    owasp: "A04:2021 Insecure Design"
+    pattern: 'move_uploaded_file\s*\([^)]*\)'
+    not_requires: 'finfo|mime_content_type|getimagesize|pathinfo'
+    description: >
+      An upload written without a type check can be a .php file. If it lands
+      under the document root, fetching it executes it.
+    remediation: >
+      Store uploads outside the web root, generate the filename yourself, and
+      verify the content type by inspection — finfo or getimagesize — not by
+      the extension or the client-supplied MIME type.
+    tags: [upload, rce]
+
+  - id: php.header-injection
+    title: Response header built from request data
+    severity: medium
+    confidence: medium
+    category: injection
+    cwe: 113
+    pattern: 'header\s*\([^)]*\$_(?:GET|POST|REQUEST|COOKIE)'
+    prefilters: ['$_get', '$_post', '$_request', '$_cookie']
+    description: >
+      Request data in a header can inject further headers or a response body
+      when it contains newlines, and a Location built this way is an open
+      redirect.
+    remediation: >
+      Validate against a fixed list of acceptable values, and strip CR and LF
+      before the value reaches header().
+    tags: [header-injection]
+    examples:
+      - 'header("Location: " . $_GET["next"]);'
+    counterexamples:
+      - 'header("Content-Type: text/html");'
+
+  - id: php.eval-usage
+    title: eval on a dynamic expression
+    severity: critical
+    confidence: high
+    category: injection
+    cwe: 95
+    patterns:
+      - 'eval\s*\([^)]*\$'
+      - 'assert\s*\(\s*\$'
+      - 'create_function\s*\('
+      - 'preg_replace\s*\(\s*["''][^"'']*/[a-zA-Z]*e[a-zA-Z]*["'']'
+    prefilters: [eval, assert, create_function, preg_replace]
+    description: >
+      eval, assert on a string, create_function, and the /e modifier on
+      preg_replace all execute their argument as PHP.
+    remediation: >
+      Replace with explicit logic. For preg_replace, use preg_replace_callback,
+      which never evaluates the replacement as code.
+    tags: [rce]
+    examples:
+      - 'eval($userCode);'
+      - 'create_function("$a", "return $a;");'
+    counterexamples:
+      - '$x = 1;'
+
+  - id: php.session-fixation
+    title: Session started without regenerating the id at login
+    severity: medium
+    confidence: low
+    category: authn
+    cwe: 384
+    pattern: 'session_start\s*\(\s*\)'
+    requires: '(?i)login|signin|authenticate'
+    not_requires: 'session_regenerate_id'
+    description: >
+      If the session id survives authentication, an attacker who planted a
+      known id before login is logged in as the victim afterwards.
+    remediation: >
+      Call session_regenerate_id(true) immediately after a successful
+      authentication, and again on privilege changes.
+    tags: [session]
+
+  - id: php.insecure-cookie
+    title: Cookie set without Secure, HttpOnly, or SameSite
+    severity: medium
+    confidence: medium
+    category: config
+    cwe: 1004
+    patterns:
+      - 'setcookie\s*\([^)]*\)'
+      - 'session\.cookie_httponly\s*[,=]\s*["'']?0'
+    not_patterns:
+      - 'httponly.*true|true.*httponly|["'']samesite["'']'
+    description: >
+      Without HttpOnly a cookie is readable by JavaScript, so an XSS becomes
+      session theft. Without Secure it is sent over plain HTTP. Without
+      SameSite it rides along on cross-site requests.
+    remediation: >
+      Set all three: setcookie($name, $value, ['secure' => true, 'httponly' =>
+      true, 'samesite' => 'Lax']).
+    tags: [cookie, session]

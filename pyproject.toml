@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lory-code-security-scanner"
+version = "0.1.0"
+description = "Local static security scanner for source trees — the half of lory-code-security that does the finding"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+authors = [{ name = "Lorikeet Security", email = "security@lorikeetsecurity.com" }]
+keywords = ["security", "sast", "static-analysis", "scanner", "secrets", "sarif", "cwe", "lory"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Security",
+]
+
+# Deliberately the same three as lory-code-security, so installing the scanner
+# next to the TUI pulls in nothing new.
+dependencies = [
+    "click>=8.1",
+    "pyyaml>=6.0",
+    "rich>=13.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+lory-scan = "lory_scanner.cli.main:main"
+
+[project.urls]
+Homepage = "https://lorikeetsecurity.com"
+Repository = "https://github.com/Lorikeet-Security/lory-code-security-scanner"
+Issues = "https://github.com/Lorikeet-Security/lory-code-security-scanner/issues"
+"Findings TUI" = "https://github.com/Lorikeet-Security/lory-findings-tui"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["lory_scanner*"]
+
+[tool.setuptools.package-data]
+"lory_scanner.rules" = ["*.yml"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

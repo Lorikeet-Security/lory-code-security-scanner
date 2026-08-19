@@ -1,0 +1,33 @@
+# Scan output
+*.sarif
+findings.json
+report.json
+.lory_state/
+
+# Local overrides of the scanner's own config
+.lory-scan.local.yml
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.tox/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Local venv used for development
+.venv/

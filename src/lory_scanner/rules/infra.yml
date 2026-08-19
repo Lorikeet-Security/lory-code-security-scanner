@@ -1,0 +1,359 @@
+# Infrastructure, containers, CI, and shell.
+#
+# lory-scan:ignore-file[shell.*,docker.*,k8s.*,terraform.*,ci.*,config.*] -- the
+# patterns and `examples:` below are the definitions of these rules, so scanning
+# this file reports the ruleset to itself.
+#
+# Configuration is where a scanner earns its keep: these are one-line settings
+# with large consequences, they are easy to state exactly, and they are almost
+# never caught in review because the file they live in is skimmed.
+
+rules:
+  # ── Shell ──────────────────────────────────────────────────────────────────
+  - id: shell.curl-pipe-shell
+    title: Remote script piped straight into a shell
+    severity: high
+    confidence: high
+    category: supply-chain
+    cwe: 494
+    languages: [shell, dockerfile, make, yaml]
+    patterns:
+      - 'curl\s[^|]*\|\s*(?:sudo\s+)?(?:ba|z|k|d)?sh'
+      - 'wget\s[^|]*\|\s*(?:sudo\s+)?(?:ba|z|k|d)?sh'
+    description: >
+      Whatever the server returns is executed, with no signature check and no
+      chance to read it first. The server can also serve different content to
+      a piped request than to a browser.
+    remediation: >
+      Download to a file, verify a published checksum or signature, then run
+      it. In an image build, pin the version and the digest.
+    tags: [supply-chain]
+    examples:
+      - 'curl -sL https://example.com/i.sh | sh'
+    counterexamples:
+      - 'curl -sLo i.sh https://example.com/i.sh'
+
+  - id: shell.insecure-download
+    title: Certificate check disabled on a download
+    severity: high
+    confidence: high
+    category: crypto
+    cwe: 295
+    languages: [shell, dockerfile, make, yaml]
+    patterns:
+      - 'curl\s(?:[^|\n]*\s)?-k\b'
+      - 'curl\s[^|\n]*--insecure\b'
+      - 'wget\s[^|\n]*--no-check-certificate\b'
+    description: >
+      With verification off, anything on the network path can substitute the
+      file being downloaded — which is usually a binary about to be executed.
+    remediation: >
+      Fix the trust store rather than skipping the check: install the CA
+      certificate, or use a host with a valid certificate.
+    tags: [tls, supply-chain]
+    examples:
+      - 'curl -k https://example.com/f'
+      - 'wget --no-check-certificate https://x/f'
+    counterexamples:
+      - 'curl -sSf https://example.com/f'
+
+  - id: shell.unquoted-variable-expansion
+    title: Unquoted variable in a dangerous command
+    severity: medium
+    confidence: low
+    category: injection
+    cwe: 78
+    languages: [shell]
+    pattern: '(?:rm|mv|cp|chmod|chown|eval|dd)\s+(?:-\w+\s+)*\$(?:\{)?\w+'
+    not_patterns:
+      - '"\$'
+    description: >
+      An unquoted expansion is word-split and glob-expanded. If the variable
+      is empty, `rm -rf $DIR/` becomes `rm -rf /`.
+    remediation: >
+      Quote every expansion — "$DIR" — and add `set -euo pipefail` so an unset
+      variable stops the script rather than expanding to nothing.
+    tags: [shell]
+
+  - id: shell.eval-usage
+    title: eval in a shell script
+    severity: medium
+    confidence: medium
+    category: injection
+    cwe: 78
+    languages: [shell]
+    pattern: '^\s*eval\s+[^\n]*\$'
+    description: >
+      eval re-parses its argument as shell, so any expanded value becomes
+      code.
+    remediation: >
+      Use arrays for building command lines, and "${cmd[@]}" to run them.
+    tags: [shell]
+
+  # ── Docker ─────────────────────────────────────────────────────────────────
+  - id: docker.run-as-root
+    title: Container image runs as root
+    severity: medium
+    confidence: medium
+    category: config
+    cwe: 250
+    languages: [dockerfile]
+    pattern: '^\s*FROM\s+'
+    requires: '^\s*(?:RUN|CMD|ENTRYPOINT)'
+    not_requires: '^\s*USER\s+'
+    description: >
+      With no USER instruction the process runs as root inside the container.
+      A container escape, or a writable mounted volume, then has root's reach.
+    remediation: >
+      Create an unprivileged user in the image and switch to it: RUN adduser
+      --system app && USER app, placed after the steps that need root.
+    tags: [docker, hardening]
+
+  - id: docker.latest-tag
+    title: Base image pinned only to a floating tag
+    severity: low
+    confidence: high
+    category: supply-chain
+    cwe: 1104
+    languages: [dockerfile]
+    patterns:
+      - '^\s*FROM\s+\S+:latest'
+      - '^\s*FROM\s+[a-z0-9._/\-]+\s*(?:AS\s|$)'
+    description: >
+      :latest and an untagged image both mean "whatever is there now", so the
+      build is not reproducible and a compromised upstream tag is pulled
+      silently.
+    remediation: >
+      Pin to a version tag and, for anything security-sensitive, to a digest:
+      FROM node:20.11.1-alpine@sha256:…
+    tags: [docker, supply-chain]
+    examples:
+      - 'FROM node:latest'
+    counterexamples:
+      - 'FROM node:20.11.1-alpine'
+
+  - id: docker.secret-in-build-arg
+    title: Secret passed through a build argument or ENV
+    severity: high
+    confidence: medium
+    category: secrets
+    cwe: 798
+    languages: [dockerfile]
+    patterns:
+      - '^\s*ARG\s+\w*(?:SECRET|PASSWORD|TOKEN|KEY|CREDENTIAL)\w*\s*='
+      - '^\s*ENV\s+\w*(?:SECRET|PASSWORD|TOKEN|APIKEY|API_KEY)\w*[\s=]+\S+'
+    not_patterns:
+      - '(?:=\s*$|\$\{|example|changeme|placeholder)'
+    description: >
+      ARG and ENV values are recorded in the image layers and are readable
+      with docker history by anyone who can pull the image.
+    remediation: >
+      Use BuildKit secret mounts — RUN --mount=type=secret,id=npm_token — so
+      the value is available during the build without being committed to a
+      layer. Inject runtime secrets when the container starts.
+    tags: [docker, secrets]
+
+  - id: docker.privileged-compose
+    title: Container granted privileged mode or host namespaces
+    severity: high
+    confidence: high
+    category: config
+    cwe: 250
+    languages: [yaml]
+    paths: ["**/docker-compose*.y*ml", "**/compose*.y*ml"]
+    patterns:
+      - '^\s*privileged\s*:\s*true'
+      - '^\s*network_mode\s*:\s*["'']?host'
+      - '^\s*pid\s*:\s*["'']?host'
+      - '/var/run/docker\.sock'
+    description: >
+      Privileged mode disables the isolation that makes a container a security
+      boundary, and mounting the Docker socket is equivalent to giving the
+      container root on the host.
+    remediation: >
+      Grant the specific capability the workload needs with cap_add instead of
+      privileged, and keep the Docker socket out of containers — use a proxy
+      with a restricted API surface if one genuinely needs to talk to Docker.
+    tags: [docker, hardening]
+
+  # ── Kubernetes ─────────────────────────────────────────────────────────────
+  - id: k8s.privileged-container
+    title: Kubernetes container running privileged or as root
+    severity: high
+    confidence: medium
+    category: config
+    cwe: 250
+    languages: [yaml]
+    patterns:
+      - '^\s*privileged\s*:\s*true'
+      - '^\s*allowPrivilegeEscalation\s*:\s*true'
+      - '^\s*runAsNonRoot\s*:\s*false'
+      - '^\s*hostNetwork\s*:\s*true'
+    requires: '(?m)^\s*(?:apiVersion|kind)\s*:'
+    description: >
+      A privileged pod has the host's devices and capabilities, so it is not
+      meaningfully isolated from the node it runs on.
+    remediation: >
+      Set securityContext.runAsNonRoot: true,
+      allowPrivilegeEscalation: false, and drop all capabilities, adding back
+      only what the workload needs.
+    tags: [kubernetes, hardening]
+
+  - id: k8s.secret-in-manifest
+    title: Secret value written into a manifest
+    severity: high
+    confidence: medium
+    category: secrets
+    cwe: 798
+    languages: [yaml]
+    pattern: '(?m)^\s*(?:password|passwd|token|apiKey|api_key|secretKey|privateKey)\s*:\s*(?!["'']?\s*(?:\$|\{\{|valueFrom|secretKeyRef))["'']?[A-Za-z0-9+/=_\-]{8,}'
+    requires: '(?m)^\s*kind\s*:'
+    description: >
+      A literal credential in a manifest is in the repository, in CI logs, and
+      in whatever tool renders the manifest. Kubernetes Secret objects are
+      base64, not encrypted, so that spelling is no better.
+    remediation: >
+      Reference a Secret with valueFrom.secretKeyRef and create the Secret
+      out-of-band, or use a sealed-secrets or external-secrets operator.
+    tags: [kubernetes, secrets]
+
+  # ── Terraform ──────────────────────────────────────────────────────────────
+  - id: terraform.public-ingress
+    title: Security group open to the whole internet
+    severity: high
+    confidence: medium
+    category: config
+    cwe: 284
+    languages: [terraform]
+    pattern: 'cidr_blocks\s*=\s*\[\s*["'']0\.0\.0\.0/0["'']'
+    description: >
+      An ingress rule from 0.0.0.0/0 exposes the port to every host on the
+      internet. Reasonable for 443 on a load balancer; rarely right for SSH,
+      RDP, or a database port.
+    remediation: >
+      Restrict the CIDR to your networks, or front the service with a load
+      balancer and allow only its security group.
+    tags: [terraform, network]
+    examples:
+      - 'cidr_blocks = ["0.0.0.0/0"]'
+    counterexamples:
+      - 'cidr_blocks = ["10.0.0.0/8"]'
+
+  - id: terraform.unencrypted-storage
+    title: Storage or database created without encryption
+    severity: medium
+    confidence: medium
+    category: crypto
+    cwe: 311
+    languages: [terraform]
+    patterns:
+      - 'storage_encrypted\s*=\s*false'
+      - 'encrypted\s*=\s*false'
+      - 'skip_final_snapshot\s*=\s*true'
+    description: >
+      Encryption at rest is a one-line setting that cannot be enabled later on
+      most resources without a rebuild, and it is usually a compliance
+      requirement as well as a control.
+    remediation: >
+      Set storage_encrypted = true (with a KMS key where the provider supports
+      one) at creation time.
+    tags: [terraform, crypto]
+
+  - id: terraform.public-bucket
+    title: Object storage bucket exposed publicly
+    severity: high
+    confidence: medium
+    category: config
+    cwe: 284
+    languages: [terraform]
+    patterns:
+      - 'acl\s*=\s*["'']public-read(?:-write)?["'']'
+      - 'block_public_acls\s*=\s*false'
+      - 'restrict_public_buckets\s*=\s*false'
+    description: >
+      A publicly readable bucket is readable by anyone who guesses or is told
+      the name, and bucket names are routinely enumerated.
+    remediation: >
+      Keep the public access block on, and serve public objects through a CDN
+      with an origin access identity rather than by opening the bucket.
+    tags: [terraform, s3]
+
+  # ── CI ─────────────────────────────────────────────────────────────────────
+    examples:
+      - 'acl = "public-read"'
+    counterexamples:
+      - 'acl = "private"'
+  - id: ci.pull-request-target-checkout
+    title: GitHub Actions workflow runs untrusted code with secrets
+    severity: critical
+    confidence: medium
+    category: supply-chain
+    cwe: 269
+    languages: [yaml]
+    paths: ["**/.github/workflows/*.y*ml"]
+    pattern: 'pull_request_target'
+    requires: '(?m)ref:\s*\$\{\{\s*github\.event\.pull_request\.head'
+    description: >
+      pull_request_target runs with the base repository's secrets and write
+      token. Checking out the pull request's head under it executes a
+      contributor's code with those credentials — the standard way CI secrets
+      leak from an open-source project.
+    remediation: >
+      Use the pull_request trigger for anything that builds or runs PR code.
+      If you need pull_request_target, do not check out the head ref, and keep
+      the job to labelling or commenting.
+    tags: [github-actions, supply-chain]
+
+  - id: ci.unpinned-action
+    title: GitHub Action referenced by a mutable tag
+    severity: low
+    confidence: medium
+    category: supply-chain
+    cwe: 1357
+    languages: [yaml]
+    paths: ["**/.github/workflows/*.y*ml"]
+    pattern: '(?m)uses:\s*[\w.\-]+/[\w.\-]+@v?\d+(?:\.\d+)*\s*$'
+    description: >
+      A tag can be moved. An action pinned to a tag runs whatever that tag
+      points at on the day the workflow runs, with access to the job's
+      secrets.
+    remediation: >
+      Pin to a commit SHA — uses: actions/checkout@8f4b7f8… — and let
+      Dependabot raise the updates.
+    tags: [github-actions, supply-chain]
+
+  # ── Web server config ──────────────────────────────────────────────────────
+  - id: config.directory-listing
+    title: Directory listing enabled
+    severity: low
+    confidence: high
+    category: config
+    cwe: 548
+    languages: [apache, nginx, ini]
+    patterns:
+      - 'Options\s+[^\n]*\+?Indexes'
+      - 'autoindex\s+on'
+    description: >
+      Directory listing exposes filenames — backups, editor swap files, and
+      old copies that were never meant to be reachable.
+    remediation: Turn it off, and serve an explicit index instead.
+    tags: [hardening]
+
+  - id: config.tls-old-protocol
+    title: Obsolete TLS or SSL protocol enabled
+    severity: high
+    confidence: high
+    category: crypto
+    cwe: 327
+    languages: [nginx, apache, ini, yaml, terraform]
+    patterns:
+      - 'ssl_protocols[^;\n]*(?:SSLv2|SSLv3|TLSv1(?:\.0|\.1)?)\b'
+      - 'SSLProtocol[^\n]*(?:SSLv2|SSLv3|TLSv1(?:\.0|\.1)?)\b'
+      - 'minimum_protocol_version\s*=\s*["'']?TLSv1(?:\.0|\.1)?["'']?'
+    description: >
+      SSLv3, TLS 1.0, and TLS 1.1 have known attacks and are rejected by
+      current browsers and by PCI DSS.
+    remediation: >
+      Serve TLS 1.2 and 1.3 only, with a modern cipher list — Mozilla's
+      "intermediate" configuration is a good default.
+    tags: [tls]

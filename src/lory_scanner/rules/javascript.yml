@@ -1,0 +1,312 @@
+# JavaScript and TypeScript, server and browser.
+#
+# Node and the DOM share a language and almost no threat model, so most rules
+# name which side they are about in their description — the same `eval` is a
+# server RCE in an Express handler and a DOM XSS in a bundle.
+
+defaults:
+  languages: [javascript, typescript]
+
+rules:
+  - id: js.eval-usage
+    title: eval on a dynamic expression
+    severity: critical
+    confidence: medium
+    category: injection
+    cwe: 95
+    owasp: "A03:2021 Injection"
+    patterns:
+      - '\beval\s*\([^)]*(?:req\.|request\.|location|document\.|window\.name|params|query|body|input)'
+      - 'new\s+Function\s*\([^)]*(?:req\.|params|query|body|input)'
+    description: >
+      eval and new Function compile their argument as code. On the server that
+      is remote code execution; in the browser it is XSS that bypasses most
+      output encoding.
+    remediation: >
+      Use JSON.parse for data and an object lookup for dispatch. If you are
+      evaluating expressions deliberately, use a real expression parser with a
+      restricted grammar.
+    tags: [rce, xss]
+
+  - id: js.child-process-exec
+    title: Shell command built from a template string
+    severity: high
+    confidence: medium
+    category: injection
+    cwe: 78
+    owasp: "A03:2021 Injection"
+    patterns:
+      - '(?:child_process\.)?exec(?:Sync)?\s*\(\s*[`"''][^`"'']*\$\{'
+      - '(?:child_process\.)?exec(?:Sync)?\s*\([^)]*\+\s*(?:req|params|query|body|input|arg)'
+    description: >
+      exec runs its argument through a shell, and this one is assembled by
+      interpolation, so a value containing ; or $( ) runs a second command.
+    remediation: >
+      Use execFile or spawn with an argument array — execFile("git", ["clone",
+      url]) — which never involves a shell.
+    tags: [command-injection, node]
+    examples:
+      - 'exec(`tail /var/log/${req.query.file}`)'
+    counterexamples:
+      - 'execFile("tail", ["/var/log/app.log"])'
+
+  - id: js.dangerously-set-inner-html
+    title: React dangerouslySetInnerHTML with dynamic content
+    severity: high
+    confidence: medium
+    category: xss
+    cwe: 79
+    owasp: "A03:2021 Injection"
+    pattern: 'dangerouslySetInnerHTML\s*=\s*\{\{\s*__html:\s*(?!["''`])'
+    description: >
+      This prop is React's escape hatch out of automatic escaping. Anything
+      reaching it is inserted as markup, so a value containing a script tag or
+      an onerror attribute executes.
+    remediation: >
+      Render the value as a child so React escapes it. If it must be HTML,
+      sanitise with DOMPurify immediately before it is passed here — not at
+      some earlier point where a later edit can bypass it.
+    tags: [xss, react]
+
+  - id: js.dom-innerhtml-sink
+    title: Markup written to the DOM from a dynamic value
+    severity: high
+    confidence: low
+    category: xss
+    cwe: 79
+    owasp: "A03:2021 Injection"
+    patterns:
+      - '\.innerHTML\s*=\s*(?!["''`][^"''`]*["''`]\s*;?\s*$)'
+      - '\.outerHTML\s*=\s*(?!["''`])'
+      - 'document\.write(?:ln)?\s*\('
+      - '\.insertAdjacentHTML\s*\('
+    not_patterns:
+      - '\.innerHTML\s*=\s*["''`]\s*["''`]'
+      - 'DOMPurify|sanitiz'
+    description: >
+      These sinks parse their input as HTML. Reaching one with any value
+      derived from the URL, storage, or a message event is DOM XSS, which
+      never touches the server and so is invisible to server-side filtering.
+    remediation: >
+      Use textContent for text. Where markup is genuinely required, sanitise
+      with DOMPurify, or build the nodes with createElement and setAttribute.
+    tags: [xss, dom]
+    examples:
+      - 'el.innerHTML = location.hash'
+    counterexamples:
+      - 'el.textContent = location.hash'
+      - 'el.innerHTML = ""'
+
+  - id: js.sql-template-literal
+    title: SQL query built from a template literal
+    severity: high
+    confidence: medium
+    category: injection
+    cwe: 89
+    owasp: "A03:2021 Injection"
+    patterns:
+      - '(?:query|execute)\s*\(\s*`[^`]*(?:SELECT|INSERT|UPDATE|DELETE|WHERE)[^`]*\$\{'
+      - '(?:SELECT|INSERT|UPDATE|DELETE)\b[^"''`\n]{0,300}["''`]\s*\+\s*(?:req|params|query|body|user|id)'
+    description: >
+      The value is interpolated into the SQL text rather than sent as a
+      parameter, so a quote in it changes the statement.
+    remediation: >
+      Use the driver's placeholders — db.query("SELECT * FROM u WHERE id = ?",
+      [id]) — or a query builder that parameterises for you. A tagged template
+      such as sql`` from postgres.js is also safe; a plain backtick is not.
+    tags: [sqli]
+
+  - id: js.nosql-injection-where
+    title: MongoDB $where or query built from request data
+    severity: high
+    confidence: medium
+    category: injection
+    cwe: 943
+    patterns:
+      - '\$where\s*:\s*(?:`|["''][^"'']*\$\{|[^"''`\s])'
+      - '\.find\s*\(\s*(?:req\.(?:body|query|params))\s*\)'
+    description: >
+      $where evaluates JavaScript inside the database. Passing a request body
+      straight to find() also lets the caller inject operators — {"$ne": null}
+      as a password turns a login check into "any password".
+    remediation: >
+      Never pass a request object as a query. Pick the fields you expect and
+      coerce their types, so an object arriving where a string was expected is
+      rejected rather than interpreted as an operator.
+    tags: [nosqli, mongodb]
+
+  - id: js.jwt-verify-disabled
+    title: JWT signature verification weakened or skipped
+    severity: critical
+    confidence: high
+    category: authn
+    cwe: 347
+    owasp: "A02:2021 Cryptographic Failures"
+    patterns:
+      - 'jwt\.decode\s*\((?![^)]*verify)'
+      - 'algorithms\s*:\s*\[[^\]]*["'']none["'']'
+      - 'ignoreExpiration\s*:\s*true'
+    description: >
+      A token that is decoded but not verified is just a base64 string the
+      caller wrote. Accepting alg "none", or ignoring expiry, has the same
+      effect: the claims are attacker-controlled.
+    remediation: >
+      Use jwt.verify() with an explicit algorithms allowlist naming the one
+      algorithm you issue with, and let expiry be enforced.
+    tags: [jwt, authn]
+    examples:
+      - 'jwt.decode(token)'
+      - 'algorithms: ["none"]'
+    counterexamples:
+      - 'jwt.verify(token, key, { algorithms: ["HS256"] })'
+
+  - id: js.cors-wildcard-credentials
+    title: CORS allows any origin together with credentials
+    severity: high
+    confidence: high
+    category: config
+    cwe: 942
+    owasp: "A05:2021 Security Misconfiguration"
+    patterns:
+      - 'origin\s*:\s*["'']\*["''][^}]*credentials\s*:\s*true'
+      - 'credentials\s*:\s*true[^}]*origin\s*:\s*["'']\*["'']'
+      - 'Access-Control-Allow-Origin["'']\s*,\s*["'']\*'
+    description: >
+      Any origin, plus credentials, means any website a logged-in user visits
+      can call your API as them and read the response. Browsers reject this
+      exact combination, and the usual "fix" — reflecting the Origin header —
+      is the same hole with extra steps.
+    remediation: >
+      List the origins you actually serve and compare against that list. If
+      the API is genuinely public, drop credentials rather than the origin
+      check.
+    tags: [cors]
+
+  - id: js.insecure-random
+    title: Math.random used for a security value
+    severity: high
+    confidence: medium
+    category: crypto
+    cwe: 338
+    pattern: '(?i)(?:token|secret|password|salt|nonce|otp|key|session|reset|uuid|id)\w*\s*=\s*[^;\n]*Math\.random\s*\('
+    description: >
+      Math.random is not a CSPRNG and is not seeded unpredictably. Values from
+      it can be predicted after observing a handful of outputs.
+    remediation: >
+      Use crypto.randomBytes() in Node, or crypto.getRandomValues() in the
+      browser. crypto.randomUUID() covers the identifier case in both.
+    tags: [randomness]
+    examples:
+      - 'const token = Math.random().toString(36)'
+    counterexamples:
+      - 'const token = crypto.randomUUID()'
+
+  - id: js.node-tls-reject-unauthorized
+    title: TLS certificate verification disabled
+    severity: high
+    confidence: high
+    category: crypto
+    cwe: 295
+    patterns:
+      - 'rejectUnauthorized\s*:\s*false'
+      - 'NODE_TLS_REJECT_UNAUTHORIZED\s*[=:]\s*["'']?0'
+    description: >
+      Any certificate is accepted, so a network-positioned attacker can
+      intercept and modify the traffic without detection.
+    remediation: >
+      Keep verification on and pass the internal CA via the ca option when the
+      certificate is privately issued.
+    tags: [tls]
+    examples:
+      - 'rejectUnauthorized: false'
+    counterexamples:
+      - 'rejectUnauthorized: true'
+
+  - id: js.prototype-pollution-merge
+    title: Recursive merge into an object without key filtering
+    severity: high
+    confidence: low
+    category: injection
+    cwe: 1321
+    patterns:
+      - 'for\s*\(\s*(?:const|let|var)\s+\w+\s+in\s+\w+\s*\)\s*\{[^}]*\[\s*\w+\s*\]\s*='
+      - 'Object\.assign\s*\(\s*\w+\s*,\s*(?:req\.body|JSON\.parse)'
+    not_patterns:
+      - '__proto__|hasOwnProperty|Object\.create\(null\)'
+    description: >
+      Copying keys from untrusted input without excluding __proto__ and
+      constructor lets a caller write onto Object.prototype, changing
+      behaviour everywhere in the process — including flags such as isAdmin.
+    remediation: >
+      Skip __proto__, constructor, and prototype keys, or build the target
+      with Object.create(null). Established libraries are also fine, provided
+      they are patched — this class of bug recurs in them.
+    tags: [prototype-pollution]
+
+  - id: js.express-no-helmet
+    title: Express app without security headers middleware
+    severity: low
+    confidence: low
+    category: config
+    cwe: 693
+    pattern: 'express\s*\(\s*\)'
+    requires: 'require\s*\(\s*["'']express|from\s+["'']express'
+    not_requires: 'helmet|X-Frame-Options|contentSecurityPolicy'
+    description: >
+      No helmet() or equivalent, so responses go out without CSP,
+      X-Content-Type-Options, or Referrer-Policy. Not a vulnerability by
+      itself; it removes the mitigations that limit one.
+    remediation: >
+      app.use(helmet()) as one of the first middlewares, then tune the CSP to
+      your assets rather than disabling it.
+    tags: [headers, express]
+
+  - id: js.postmessage-wildcard-origin
+    title: postMessage to any origin, or a listener that does not check origin
+    severity: medium
+    confidence: medium
+    category: config
+    cwe: 346
+    patterns:
+      - 'postMessage\s*\([^)]*,\s*["'']\*["'']'
+      - 'addEventListener\s*\(\s*["'']message["''][^)]*\)\s*(?:=>|\{)(?![^}]*\.origin)'
+    description: >
+      Sending to "*" delivers the message to whatever document currently
+      occupies the frame. Receiving without checking event.origin accepts
+      messages from any page that can get a handle to yours.
+    remediation: >
+      Pass the exact target origin when sending, and compare event.origin
+      against an expected value before acting on a received message.
+    tags: [postmessage, dom]
+
+  - id: js.open-redirect
+    title: Redirect target taken from request data
+    severity: medium
+    confidence: low
+    category: redirect
+    cwe: 601
+    patterns:
+      - 'res\.redirect\s*\([^)]*(?:req\.(?:query|params|body)|\$\{)'
+      - '(?:location\.href|location\.replace|window\.location)\s*=\s*[^;\n]*(?:params\.get|location\.search|location\.hash)'
+    description: >
+      A redirect whose destination comes from the request sends users to any
+      site an attacker names, under your domain's link — the standard opener
+      for a credential phishing page.
+    remediation: >
+      Redirect to a path you construct, or map an opaque key to a destination
+      from a fixed table. If you must accept a URL, require it to be relative
+      or on a host you list.
+    tags: [redirect]
+
+  - id: js.debugger-statement
+    title: debugger statement left in source
+    severity: low
+    confidence: high
+    category: config
+    cwe: 489
+    pattern: '^\s*debugger\s*;?\s*$'
+    description: >
+      A debugger statement halts execution whenever devtools are open. It is
+      almost always a leftover from local work.
+    remediation: Remove it, and add no-debugger to your lint rules.
+    tags: [debug]

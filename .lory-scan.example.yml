@@ -1,0 +1,134 @@
+# lory-scan — example configuration.
+#
+# Copy to .lory-scan.yml at the root of the repository you want to scan. Every
+# key is optional; a repository with no config file scans with the bundled
+# rules and sensible excludes, which is the right setting for most projects.
+#
+#   cp .lory-scan.example.yml .lory-scan.yml
+#
+# The file is looked for at the scan root and upwards to the repository root,
+# so scanning a subdirectory still picks up the policy the team agreed on.
+# --config points at a specific file, and LORY_SCAN_CONFIG does the same from
+# the environment.
+#
+# Command-line flags win over this file. List-valued flags add to these lists
+# rather than replacing them, so a one-off --exclude cannot silently drop the
+# excludes below.
+#
+# Nothing here is a credential: lory-scan makes no network calls at all.
+
+
+# ── What to scan ────────────────────────────────────────────────────────────
+
+# Extra paths to skip, on top of the built-in list (.git, node_modules,
+# vendor, dist, build, lockfiles, minified bundles, and this tool's own
+# .lory_state output).
+exclude:
+  - "**/fixtures/**"
+  - "**/testdata/**"
+  - "docs/**"
+
+# When set, *only* these paths are scanned. Empty means "everything".
+# include:
+#   - "src/**"
+
+# Replace the built-in excludes instead of adding to them. For the rare audit
+# that genuinely needs to look inside vendored code.
+no_default_excludes: false
+
+# Honour .gitignore, when the tree is a git checkout. In a checkout the file
+# list comes from git itself, which is both faster and exactly what a
+# developer means by "the files in my repo".
+respect_gitignore: true
+
+# Skip anything larger than this. Big files are nearly always generated,
+# bundled, or data.
+max_file_bytes: 2000000
+
+
+# ── Which rules run ─────────────────────────────────────────────────────────
+
+# Your own rule files, alongside the bundled ones. Paths are relative to this
+# config file. A local rule that reuses a bundled rule's id replaces it, which
+# is how you retune a noisy rule without forking the package.
+# rule_dirs:
+#   - security/rules
+
+# Use only rule_dirs, ignoring the bundled ruleset entirely.
+no_default_rules: false
+
+# Allowlist by rule id glob. Empty means every rule.
+# select:
+#   - "secrets.*"
+#   - "python.*"
+
+# Rules to switch off. This wins over `select`.
+#
+# Prefer an inline `# lory-scan:ignore[rule.id]` comment for a single line you
+# have reviewed — it records the decision next to the code it excuses, where
+# the next reader will see it. Turn a rule off here only when it is wrong for
+# this codebase everywhere.
+ignore_rules:
+  - js.express-no-helmet
+
+# Only run rules in these categories. `lory-scan rules list` prints them.
+# categories:
+#   - secrets
+#   - injection
+
+# Reclassify a rule for this codebase. The rule still runs; it is reported at
+# the severity you set.
+# severity_overrides:
+#   docker.latest-tag: info
+
+
+# ── What gets reported ──────────────────────────────────────────────────────
+
+# Drop findings below this severity: critical | high | medium | low | info.
+min_severity: info
+
+# Drop findings below this confidence: high | medium | low.
+#
+# Confidence is not severity. `low` means the rule matched a pattern it cannot
+# fully verify — a sink whose input it cannot trace. Raising this to `medium`
+# is the fastest way to quieten a first scan without hiding whole categories.
+min_confidence: low
+
+# Exit 1 when a finding reaches this severity, for CI. `never` always exits 0.
+fail_on: high
+
+# Stop after this many findings. 0 means no cap.
+max_findings: 0
+
+
+# ── Secrets ─────────────────────────────────────────────────────────────────
+
+# Generic high-entropy secret detection, over and above the rules that match
+# known credential shapes (AWS, GitHub, Stripe, and the rest).
+entropy: true
+
+# Bits of entropy per character before a string assigned to a secret-sounding
+# name counts as a candidate. Lower finds more and is noisier. 4.0 was set
+# against real repositories; below about 3.5 every base64 blob matches.
+entropy_threshold: 4.0
+
+
+# ── Suppressions and baselines ──────────────────────────────────────────────
+
+# Honour `lory-scan:ignore` comments in the source.
+suppressions: true
+
+# Treat the findings in this file as already known and report only what is
+# new. Create it with `lory-scan scan --write-baseline .lory-scan-baseline.json`.
+#
+# A baseline is for adopting the scanner on an existing codebase without
+# stopping the world. It is not a fix — everything in it is still there.
+# baseline: .lory-scan-baseline.json
+
+
+# ── The findings TUI ────────────────────────────────────────────────────────
+
+# Where `lory-scan sync` writes the findings cache that `lory-code-security`
+# reads. This is that tool's own state directory, so the default is right
+# unless you changed `state_dir` in its config too.
+state_dir: .lory_state

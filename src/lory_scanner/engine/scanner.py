@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import sys
 import time
 from collections.abc import Iterable
 from concurrent.futures import ProcessPoolExecutor
@@ -191,7 +192,15 @@ class Scanner:
                     walker.stats.scanned += int(stats["scanned"])
                     walker.stats.skipped_binary += int(stats["skipped_binary"])
                     walker.stats.unreadable.extend(stats["unreadable"])
-        except (OSError, RuntimeError, ImportError):
+        except (OSError, RuntimeError, ImportError) as exc:
+            # Say so. Falling back silently turns a broken pool into a scan
+            # that is mysteriously four times slower, with nothing to explain
+            # it, and hides a worker dying on a file that will kill the
+            # sequential pass too.
+            print(
+                f"lory-scan: parallel scan unavailable ({exc}); using one process",
+                file=sys.stderr,
+            )
             walker.stats.scanned = 0
             walker.stats.skipped_binary = 0
             walker.stats.unreadable.clear()
@@ -214,6 +223,9 @@ class Scanner:
         lines = source.lines
         lowered = source.text.lower()
         seen: dict[str, int] = {}
+        #: Every credential literal found anywhere in this file, so none of
+        #: them survives in any finding's context. See :func:`_mask_secrets`.
+        secrets: set[str] = set()
 
         for rule in self.active:
             if not rule.applies_to_language(source.language):
@@ -229,15 +241,16 @@ class Scanner:
             if rule.not_requires and rule.not_requires.search(source.text):
                 continue
 
-            findings.extend(self._run_rule(rule, source, lines, seen))
+            findings.extend(self._run_rule(rule, source, lines, seen, secrets))
 
         if self.config.entropy and _rule_enabled(ENTROPY_RULE_ID, self.config):
-            findings.extend(self._run_entropy(source, lines, seen))
+            findings.extend(self._run_entropy(source, lines, seen, secrets))
 
-        return _one_per_line(findings)
+        return _mask_secrets(_one_per_line(findings), secrets)
 
     def _run_rule(
-        self, rule: Rule, source: SourceFile, lines: list[str], seen: dict[str, int]
+        self, rule: Rule, source: SourceFile, lines: list[str], seen: dict[str, int],
+        secrets: set[str],
     ) -> list[Finding]:
         out: list[Finding] = []
 
@@ -264,6 +277,7 @@ class Scanner:
                         # A rule in the secrets category matched the
                         # credential itself, so the finding must not carry it.
                         redact=_secret_span(text) if rule.category == "secrets" else "",
+                        secrets=secrets,
                         rule_id=rule.id,
                         title=rule.title,
                         severity=self.config.severity_overrides.get(rule.id, rule.severity),
@@ -286,7 +300,7 @@ class Scanner:
         return out
 
     def _run_entropy(
-        self, source: SourceFile, lines: list[str], seen: dict[str, int]
+        self, source: SourceFile, lines: list[str], seen: dict[str, int], secrets: set[str]
     ) -> list[Finding]:
         out: list[Finding] = []
 
@@ -307,6 +321,7 @@ class Scanner:
                         # copy of the credential it is reporting.
                         match_text=candidate.redacted,
                         redact=candidate.value,
+                        secrets=secrets,
                         seen=seen,
                         category="secrets",
                         cwe="CWE-798",
@@ -345,6 +360,7 @@ class Scanner:
         match_text: str,
         seen: dict[str, int],
         redact: str = "",
+        secrets: set[str] | None = None,
         **meta: Any,
     ) -> Finding:
         """Assemble one finding, including its per-file occurrence index.
@@ -359,6 +375,8 @@ class Scanner:
         context = _context(lines, line_no)
 
         if redact:
+            if secrets is not None:
+                secrets.add(redact)
             masked = mask(redact)
             # Both spellings: the stored match collapses whitespace, so the
             # raw form alone would miss it.
@@ -486,6 +504,44 @@ def _path_allowed(source: SourceFile, rule: Rule) -> bool:
         for pattern in rule.exclude_paths
         for candidate in candidates
     )
+
+
+def _mask_secrets(findings: list[Finding], secrets: set[str]) -> list[Finding]:
+    """Mask every credential found in this file, in every finding from it.
+
+    Redacting a secret only in the finding that matched it is not enough. Each
+    finding carries two lines of context either side, so a credential on line 2
+    is quoted in full by any finding on lines 1 to 4 — including findings from
+    rules that have nothing to do with secrets and therefore redact nothing. In
+    one QA run, `docker.latest-tag` reported an API key.
+
+    Longest first, so a secret containing another is masked whole rather than
+    being half-substituted from the inside out.
+    """
+    if not secrets:
+        return findings
+
+    forms: dict[str, str] = {}
+    for secret in secrets:
+        masked = mask(secret)
+        forms[secret] = masked
+        forms.setdefault(" ".join(secret.split()), masked)
+
+    ordered = sorted(forms.items(), key=lambda kv: len(kv[0]), reverse=True)
+
+    for finding in findings:
+        finding.snippet = _replace_all(finding.snippet, ordered)
+        finding.match = _replace_all(finding.match, ordered)
+        finding.context = [_replace_all(line, ordered) for line in finding.context]
+
+    return findings
+
+
+def _replace_all(text: str, forms: list[tuple[str, str]]) -> str:
+    for form, masked in forms:
+        if form in text:
+            text = text.replace(form, masked)
+    return text
 
 
 def _one_per_line(findings: list[Finding]) -> list[Finding]:

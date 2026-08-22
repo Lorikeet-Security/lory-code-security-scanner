@@ -31,6 +31,9 @@ err_console = Console(stderr=True)
 EXIT_OK = 0
 EXIT_FINDINGS = 1
 EXIT_ERROR = 2
+#: Ctrl-C. The shell convention (128 + SIGINT), kept distinct from 1 so an
+#: abandoned scan is not mistaken for a failing one.
+EXIT_INTERRUPTED = 130
 
 F = TypeVar("F", bound=Callable[..., Any])
 

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import stat
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -194,16 +195,17 @@ def init(
     # point naming a file that was declined.
     baseline_written = False
     if want_baseline:
-        baseline_written = _write_baseline(root, baseline_path, force, plan)
+        baseline_written = _write_baseline(root, baseline_path, force, yes, plan)
 
-    _write_config(root, plan, force, min_confidence, fail_on,
+    _write_config(root, plan, force, yes, min_confidence, fail_on,
                   baseline_written or baseline_path.exists())
 
     if _decide(hook, yes, "Install a pre-commit hook that scans staged files?", default=True):
-        _write_hook(root, plan, force, fail_on, baseline_written or baseline_path.exists())
+        _write_hook(root, plan, force, yes, fail_on,
+                    baseline_written or baseline_path.exists())
 
     if _decide(ci, yes, "Write a GitHub Actions workflow?", default=True):
-        _write_workflow(root, plan, force, fail_on, default_branch,
+        _write_workflow(root, plan, force, yes, fail_on, default_branch,
                         baseline_written or baseline_path.exists())
 
     _summarise(plan)
@@ -216,16 +218,29 @@ def _decide(flag: bool | None, yes: bool, question: str, default: bool) -> bool:
         return flag
     if yes:
         return default
+    return _ask(question, default)
+
+
+def _ask(question: str, default: bool) -> bool:
+    """Ask, unless there is nobody to answer.
+
+    With no terminal on stdin — a CI step, a Dockerfile, a script — a prompt
+    never returns. Taking the default there is the only behaviour that is not a
+    hang, and the summary at the end reports what was decided either way.
+    """
+    if not sys.stdin.isatty():
+        return default
     return click.confirm(question, default=default)
 
 
 def _write_config(
-    root: Path, plan: Plan, force: bool, min_confidence: str, fail_on: str, has_baseline: bool
+    root: Path, plan: Plan, force: bool, yes: bool, min_confidence: str,
+    fail_on: str, has_baseline: bool,
 ) -> None:
     existing = next((root / name for name in CONFIG_NAMES if (root / name).is_file()), None)
     target = existing or (root / CONFIG_NAMES[0])
 
-    if existing and not _may_overwrite(target, force):
+    if existing and not _may_overwrite(target, force, yes):
         plan.record(target, False, "kept, already exists")
         return
 
@@ -238,8 +253,8 @@ def _write_config(
     plan.record(target, True)
 
 
-def _write_baseline(root: Path, target: Path, force: bool, plan: Plan) -> bool:
-    if target.exists() and not _may_overwrite(target, force):
+def _write_baseline(root: Path, target: Path, force: bool, yes: bool, plan: Plan) -> bool:
+    if target.exists() and not _may_overwrite(target, force, yes):
         plan.record(target, False, "kept, already exists")
         return True
 
@@ -260,13 +275,15 @@ def _write_baseline(root: Path, target: Path, force: bool, plan: Plan) -> bool:
     return True
 
 
-def _write_hook(root: Path, plan: Plan, force: bool, fail_on: str, has_baseline: bool) -> None:
+def _write_hook(
+    root: Path, plan: Plan, force: bool, yes: bool, fail_on: str, has_baseline: bool
+) -> None:
     target = root / HOOK_PATH
 
     if not (root / ".git").is_dir():
         plan.record(target, False, "not a git checkout")
         return
-    if target.exists() and not _may_overwrite(target, force):
+    if target.exists() and not _may_overwrite(target, force, yes):
         plan.record(target, False, "kept, already exists")
         return
 
@@ -281,10 +298,11 @@ def _write_hook(root: Path, plan: Plan, force: bool, fail_on: str, has_baseline:
 
 
 def _write_workflow(
-    root: Path, plan: Plan, force: bool, fail_on: str, default_branch: str, has_baseline: bool
+    root: Path, plan: Plan, force: bool, yes: bool, fail_on: str,
+    default_branch: str, has_baseline: bool,
 ) -> None:
     target = root / WORKFLOW_PATH
-    if target.exists() and not _may_overwrite(target, force):
+    if target.exists() and not _may_overwrite(target, force, yes):
         plan.record(target, False, "kept, already exists")
         return
 
@@ -297,10 +315,18 @@ def _write_workflow(
     plan.record(target, True)
 
 
-def _may_overwrite(target: Path, force: bool) -> bool:
+def _may_overwrite(target: Path, force: bool, yes: bool) -> bool:
+    """Whether an existing file may be replaced.
+
+    ``--force`` says yes. ``--yes`` accepts defaults, and the default for
+    "replace a file you already have" is no: a config or a hook someone edited
+    is worth more than the one this command would write.
+    """
     if force:
         return True
-    return click.confirm(f"{target} exists. Replace it?", default=False)
+    if yes:
+        return False
+    return _ask(f"{target.name} exists. Replace it?", default=False)
 
 
 def _summarise(plan: Plan) -> None:

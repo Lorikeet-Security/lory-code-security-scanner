@@ -176,6 +176,7 @@ Exit codes, which are the whole interface in CI:
 | `0` | no findings at or above `--fail-on` (default: `high`) |
 | `1` | findings at or above `--fail-on` |
 | `2` | the scan could not run — bad config, bad rules, unreadable path |
+| `130` | interrupted (Ctrl-C) — kept distinct from `1` so an abandoned scan is not read as a failing one |
 
 ---
 
@@ -720,7 +721,7 @@ Two consequences worth stating plainly:
 ```bash
 pip install -e ".[dev]"
 
-pytest -q                 # 127 tests
+pytest -q                 # 137 tests
 ruff check src tests
 lory-scan rules validate  # compile every rule and run its self-tests
 

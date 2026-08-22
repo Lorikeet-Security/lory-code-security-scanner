@@ -1,10 +1,14 @@
-"""Root command group for ``lory-scan``."""
+"""Root command group for ``lory-scan``, and the process entry point."""
 
 from __future__ import annotations
+
+import signal
+import sys
 
 import click
 
 from lory_scanner import __version__
+from lory_scanner.cli.common import EXIT_ERROR, EXIT_INTERRUPTED, err_console
 from lory_scanner.cli.describe import describe
 from lory_scanner.cli.init_cmd import init
 from lory_scanner.cli.rules_cmd import rules
@@ -75,5 +79,55 @@ main.add_command(rules)
 main.add_command(describe)
 
 
+def run() -> None:
+    """What the ``lory-scan`` script calls.
+
+    Two things the click group cannot do for itself:
+
+    *Encoding.* A scan of a repository containing any non-ASCII character —
+    a name, a comment, an em-dash in a rule's remediation — writes text that a
+    C-locale stdout cannot encode, and Python raises rather than degrading.
+    That is a crash on the first run inside a bare container, which is exactly
+    where CI runs. The streams are reconfigured to replace what they cannot
+    encode instead.
+
+    *Filesystem errors.* ``--out`` into a directory that does not exist is an
+    ordinary typo, and a traceback is the wrong answer to a typo.
+
+    *Interrupts.* Click turns Ctrl-C into exit 1, which in this tool's contract
+    means "findings at or above the threshold". A caller branching on the exit
+    code would read an abandoned scan as a failed one, so an interrupt exits
+    130 instead.
+    """
+    _configure_streams()
+    signal.signal(signal.SIGINT, _on_interrupt)
+
+    try:
+        # Click exits by raising SystemExit, which passes straight through.
+        main()
+    except OSError as exc:
+        err_console.print(f"[bold red]error:[/bold red] {exc}")
+        raise SystemExit(EXIT_ERROR) from exc
+    except KeyboardInterrupt:  # pragma: no cover — the handler normally wins
+        raise SystemExit(EXIT_INTERRUPTED) from None
+
+
+def _on_interrupt(signum: int, frame: object) -> None:
+    """Exit 130 on Ctrl-C, before click can report it as exit 1."""
+    err_console.print("[dim]interrupted[/dim]")
+    raise SystemExit(EXIT_INTERRUPTED)
+
+
+def _configure_streams() -> None:
+    """Make stdout and stderr survive characters they cannot encode."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="backslashreplace")
+        except (AttributeError, ValueError, OSError):
+            # Not a reconfigurable text stream — a pipe wrapper, or a stream
+            # something else already replaced. Nothing to harden.
+            continue
+
+
 if __name__ == "__main__":  # pragma: no cover
-    main()
+    run()

@@ -175,7 +175,10 @@ rules:
     cwe: 295
     owasp: "A02:2021 Cryptographic Failures"
     patterns:
-      - 'verify\s*=\s*False'
+      # As a keyword argument to a call, which is how it is actually done...
+      - '[(,]\s*verify\s*=\s*False'
+      # ...or set on a session or client object afterwards.
+      - '\.verify\s*=\s*False'
       - 'ssl\._create_unverified_context\s*\('
       - 'ssl\.CERT_NONE'
     description: >
@@ -192,8 +195,14 @@ rules:
     tags: [tls]
     examples:
       - 'requests.get(url, verify=False)'
+      - 'session.verify = False'
+      - 'ctx.verify_mode = ssl.CERT_NONE'
     counterexamples:
       - 'requests.get(url, verify="/etc/ssl/ca.pem")'
+      # A configuration flag's default is not a disabled check. This spelling
+      # is common in client wrappers and was a false positive in the wild.
+      - 'tls_verify: bool = False'
+      - 'verify_tls = False'
 
   - id: python.weak-hash
     title: Weak hash algorithm

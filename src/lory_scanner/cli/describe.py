@@ -85,6 +85,7 @@ def contract() -> dict:
             "0": "no findings at or above --fail-on",
             "1": "findings at or above --fail-on (default: high)",
             "2": "the scan could not run — bad config, bad rules, unreadable path",
+            "130": "interrupted (Ctrl-C), deliberately distinct from 1",
         },
         "formats": {
             "available": list(FORMATS),

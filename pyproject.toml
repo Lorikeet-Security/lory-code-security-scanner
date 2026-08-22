@@ -40,7 +40,7 @@ dev = [
 ]
 
 [project.scripts]
-lory-scan = "lory_scanner.cli.main:main"
+lory-scan = "lory_scanner.cli.main:run"
 
 [project.urls]
 Homepage = "https://lorikeetsecurity.com"

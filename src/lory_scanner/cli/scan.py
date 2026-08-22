@@ -60,9 +60,10 @@ def scan(
     ──────────────────────────────────────────────────────────────────────────
     EXIT CODES
     ──────────────────────────────────────────────────────────────────────────
-      0  no findings at or above --fail-on (default: high)
-      1  findings at or above --fail-on
-      2  the scan could not run
+      0    no findings at or above --fail-on (default: high)
+      1    findings at or above --fail-on
+      2    the scan could not run
+      130  interrupted
     """
     try:
         scanner, cfg = build_scanner(
@@ -81,7 +82,11 @@ def scan(
 
     if emit_cache or fmt == "lory-cache":
         target = Path(state_dir) if state_dir else (cfg.root / ".lory_state")
-        written = lory.write_cache(result, target)
+        try:
+            written = lory.write_cache(result, target)
+        except OSError as exc:
+            die(f"cannot write the findings cache in {target}: {exc.strerror or exc}")
+            return
         if not quiet and fmt not in formats.MACHINE_FORMATS:
             console.print(
                 f"[dim]wrote {len(result.findings)} findings to {written} — "
@@ -120,6 +125,8 @@ def sync(
     scanner's, so a local scan never makes the platform's findings vanish.
     Pass --replace to drop them.
     """
+    target = Path(state_dir) if state_dir else Path(path) / ".lory_state"
+
     try:
         scanner, cfg = build_scanner(
             path, config_path, ignore_suppressions=ignore_suppressions, **flags
@@ -131,6 +138,9 @@ def sync(
         written = lory.write_cache(result, target, merge=not replace)
     except ScannerError as exc:
         die(str(exc))
+        return
+    except OSError as exc:
+        die(f"cannot write the findings cache in {target}: {exc.strerror or exc}")
         return
 
     if not quiet:
@@ -156,10 +166,13 @@ def _emit(result: ScanResult, fmt: str, out: str | None, quiet: bool, no_snippet
             return
         from rich.console import Console
 
-        with open(out, "w") as handle:
-            formats.print_table(
-                Console(file=handle, width=100), result, show_snippets=not no_snippets
-            )
+        try:
+            with open(out, "w") as handle:
+                formats.print_table(
+                    Console(file=handle, width=100), result, show_snippets=not no_snippets
+                )
+        except OSError as exc:
+            die(f"cannot write {out}: {exc.strerror or exc}")
         if not quiet:
             err_console.print(f"[dim]wrote {len(result.findings)} findings to {out}[/dim]")
         return
@@ -167,7 +180,12 @@ def _emit(result: ScanResult, fmt: str, out: str | None, quiet: bool, no_snippet
     text = formats.render(result, fmt, __version__)
 
     if out:
-        Path(out).write_text(text)
+        # A path that cannot be written is a typo, not a crash. Reported here
+        # rather than at the entry point so the message can name the file.
+        try:
+            Path(out).write_text(text)
+        except OSError as exc:
+            die(f"cannot write {out}: {exc.strerror or exc}")
         if not quiet:
             err_console.print(
                 f"[dim]wrote {len(result.findings)} findings to {out} ({fmt})[/dim]"
@@ -179,8 +197,12 @@ def _emit(result: ScanResult, fmt: str, out: str | None, quiet: bool, no_snippet
 
 def _write_baseline(result: ScanResult, path: Path, quiet: bool) -> None:
     """Record every current finding as known, so future runs show only new ones."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(baseline_document(result), indent=2))
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(baseline_document(result), indent=2))
+    except OSError as exc:
+        die(f"cannot write the baseline to {path}: {exc.strerror or exc}")
+        return
     if not quiet:
         err_console.print(
             f"[dim]baselined {len(result.findings)} findings to {path}. "

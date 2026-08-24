@@ -71,6 +71,8 @@ PDF, described in terms of a URL rather than a file. `lory-scan` runs on the
 tree in front of you and reports in the only vocabulary that helps —
 `path:line`, the line itself, and what to do about it.
 
+<img src="lory-scan.png">
+
 Every finding carries:
 
 | | |
